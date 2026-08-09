@@ -142,9 +142,25 @@ class RunJournal:
             log.warning("could not journal %s: %s", event, exc)
 
     def close(self) -> None:
+        """Closing must not raise either — and this is the likeliest place to.
+
+        `write()` flushes per record, so the buffer is normally empty by now.
+        The exception is a run where an earlier flush already failed: `write()`
+        caught and logged that, but `close()` retries the residual flush against
+        the same full disk and raises.
+
+        Because the caller holds this in a `with`, that exception fires during
+        unwind and diverts the exit path — the run summary never prints, the
+        "a checkpoint was hit, do NOT retry automatically" warning never
+        prints, and the documented exit codes are replaced by a traceback. The
+        batch itself is already safe on disk by then, which makes losing the
+        report the entire cost, and an avoidable one.
+        """
         if self._fh is not None:
             try:
                 self._fh.close()
+            except Exception as exc:  # noqa: BLE001 - a logger must never raise
+                log.warning("could not close the run journal at %s: %s", self.path, exc)
             finally:
                 self._fh = None
 

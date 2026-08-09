@@ -473,3 +473,39 @@ def test_run_refuses_a_journal_path_inside_the_vault(env, tmp_path, capsys) -> N
     assert main(["-c", str(bad), "run", "--urls", str(urls), "--limit", "0", "--no-sleep"]) == 2
     assert "run journal" in capsys.readouterr().err
     assert not list(env["vault"].rglob("*.jsonl"))
+
+
+def test_journal_can_read_a_log_the_run_command_would_refuse_to_write(
+    env, tmp_path, capsys
+) -> None:
+    """Refusing a path inside the vault is a concern about writing.
+
+    Reading a file already on disk puts nothing anywhere, so the same hard stop
+    on the read path would only mean `doomnotes journal` cannot show you a file
+    you can see in Finder — a refusal that protects nothing.
+    """
+    from doomnotes.journal import RunJournal
+
+    inside = env["vault"] / "_meta" / "runs.jsonl"
+    with RunJournal(inside, run_id="r1") as j:
+        j.write("run_started", queued=1)
+        j.write("video", n=1, url="https://www.instagram.com/reel/AAAAAAAAAAA/", status="written")
+        j.write("run_finished", attempted=1)
+
+    bad = tmp_path / "config-journal-in-vault.toml"
+    bad.write_text(
+        CONFIG.format(vault=env["vault"], data=env["data"]).replace(
+            f'run_log = "{env["data"]}/logs/runs.jsonl"', f'run_log = "{inside}"'
+        ),
+        encoding="utf-8",
+    )
+
+    # run refuses to write there...
+    urls = env["tmp"] / "urls.txt"
+    urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
+    assert main(["-c", str(bad), "run", "--urls", str(urls), "--limit", "0", "--no-sleep"]) == 2
+    capsys.readouterr()
+
+    # ...but journal still reads what is already there.
+    assert main(["-c", str(bad), "journal"]) == 0
+    assert "r1" in capsys.readouterr().out

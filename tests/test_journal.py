@@ -387,3 +387,42 @@ def test_a_torn_write_does_not_swallow_the_next_record(tmp_path: Path) -> None:
     kept = read_runs(path)
     assert len(kept) == 1, f"the second record should survive the first's tear: {kept}"
     assert kept[0]["n"] == 2
+
+
+def test_closing_a_broken_journal_does_not_raise(tmp_path: Path) -> None:
+    """The likeliest place for this class to break its own contract.
+
+    write() flushes per record, so the buffer is normally empty by close time.
+    The exception is a run where an earlier flush already failed — write()
+    caught that, but close() retries the residual flush against the same full
+    disk. Since the caller holds this in a `with`, that fires during unwind and
+    replaces the run summary and the "do NOT retry automatically" checkpoint
+    warning with a traceback. The batch is already safe on disk by then, so
+    losing the report is the entire, avoidable cost.
+    """
+    path = tmp_path / "runs.jsonl"
+    journal = RunJournal(path, run_id="r1")
+
+    class RefusesToClose:
+        def write(self, s): ...
+        def flush(self): ...
+        def close(self):
+            raise OSError("No space left on device")
+
+    journal._fh = RefusesToClose()      # type: ignore[assignment]
+    journal.close()                     # must not raise
+
+
+def test_the_context_manager_does_not_divert_a_runs_exit_path(tmp_path: Path) -> None:
+    """`with open_journal(...)` must not turn a clean run into a traceback."""
+    path = tmp_path / "runs.jsonl"
+
+    class RefusesToClose:
+        def write(self, s): ...
+        def flush(self): ...
+        def close(self):
+            raise OSError("No space left on device")
+
+    with RunJournal(path, run_id="r1") as journal:
+        journal._fh = RefusesToClose()  # type: ignore[assignment]
+        journal.write("run_started")

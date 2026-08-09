@@ -47,22 +47,25 @@ def _auth_for(cfg):
 DEFAULT_RUN_LOG = "data/logs/runs.jsonl"
 
 
-def _run_log(cfg) -> Path | None:
+def _run_log(cfg, *, for_writing: bool) -> Path | None:
     """The journal path, or None when journalling is switched off.
 
     An empty string means off, deliberately — a missing key falls back to the
     default rather than silently disabling the record, because a config written
     before this existed should still get one.
 
-    Refuses a path inside the vault. The journal holds saved-video URLs and is
-    not a note, so it has no business where Obsidian indexes; and "it never
-    lands in the vault" was previously true only by virtue of the default
-    config, which is a convention rather than a guarantee. The vault has an
-    enforced boundary, so this uses it.
+    `for_writing` is the whole reason this takes a flag. Refusing a path inside
+    the vault protects the vault from gaining a file that is not a note; that is
+    a concern about *writing*. Reading a journal that is already on disk puts
+    nothing anywhere, so applying the same hard stop there would only mean
+    `doomnotes journal` cannot show you a file you can see in Finder — a refusal
+    that protects nothing.
     """
     if not cfg.get("paths", "run_log", default=DEFAULT_RUN_LOG):
         return None
     path = cfg.path("paths", "run_log", default=DEFAULT_RUN_LOG)
+    if not for_writing:
+        return path
     try:
         vault_root = check_vault_root(cfg.vault_root)
     except VaultGuardError:
@@ -163,7 +166,7 @@ def cmd_run(args, cfg) -> int:
     )
 
     try:
-        run_log = _run_log(cfg)
+        run_log = _run_log(cfg, for_writing=True)
     except VaultGuardError as exc:
         print(f"vault guard refused the run journal path: {exc}", file=sys.stderr)
         return 2
@@ -238,7 +241,7 @@ def cmd_journal(args, cfg) -> int:
     tell you that videos 12 through 30 all failed at the same stage within
     400 ms of each other, which is what a dead Ollama looks like from outside.
     """
-    path = _run_log(cfg)
+    path = _run_log(cfg, for_writing=False)
     if path is None:
         print("journalling is off — set paths.run_log in config.toml")
         return 0
