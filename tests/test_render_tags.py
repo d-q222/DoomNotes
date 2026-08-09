@@ -52,9 +52,9 @@ def test_slugify(title: str, expected: str) -> None:
 def test_slug_collision_appends_url_hash() -> None:
     n1 = make_note()
     n2 = make_note(source_url="https://www.instagram.com/reel/BBB/")
-    taken: set[str] = set()
+    taken = SlugIndex()
     s1 = note_slug(n1, taken)
-    taken.add(s1)
+    taken.claim(n1)
     s2 = note_slug(n2, taken)
     assert s1 != s2
     assert s2.startswith(s1)
@@ -63,7 +63,9 @@ def test_slug_collision_appends_url_hash() -> None:
 def test_slug_is_stable_across_reruns() -> None:
     """Hash comes from the URL, not a counter, so re-running is not -2, -3, -4."""
     n = make_note()
-    taken = {slugify(n.title)}
+    other = make_note(source_url="https://www.instagram.com/reel/ZZZ/")
+    taken = SlugIndex()
+    taken.claim(other)                       # someone else holds the base name
     assert note_slug(n, taken) == note_slug(n, taken)
 
 

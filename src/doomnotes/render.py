@@ -66,24 +66,22 @@ def _fold(slug: str) -> str:
     return slug.casefold()
 
 
-def note_slug(note: Note, taken: "set[str] | SlugIndex | None" = None) -> str:
+def note_slug(note: Note, taken: "SlugIndex | None" = None) -> str:
     """Slug for this note, with a short URL hash appended on collision.
 
     The hash is derived from the URL rather than a counter so that re-running a
     note lands on the same filename instead of accumulating `-2`, `-3` copies.
 
-    `taken` may be a bare set of slugs — in which case any match is treated as a
-    collision — or a `SlugIndex`, which knows *whose* slug each one is and so
-    can tell "another video wants this name" from "this video already owns it".
+    There is deliberately only ONE allocation path. This used to also accept a
+    bare set of slugs, treating any match as a collision — which cannot tell
+    "another video wants this name" from "this video already owns it", and
+    returned a hash-suffixed name without checking whether that was free
+    either. Nothing on the write path called it, so it was a second, weaker
+    implementation of the rule kept alive only by its own tests.
     """
-    base = slugify(note.title)
     if taken is None:
-        return base
-    if isinstance(taken, SlugIndex):
-        return taken.allocate(base, note.source_url)
-    if base not in taken:
-        return base
-    return f"{base}-{url_hash(note.source_url)}"
+        return slugify(note.title)
+    return taken.allocate(slugify(note.title), note.source_url)
 
 
 class SlugIndex:
@@ -165,11 +163,17 @@ class SlugIndex:
         # of the same pair. Getting this precedence wrong is how an orphaned
         # `_transcripts/foo.md` came to overrule a hand-written `Foo.md` and
         # hand its filename to an unrelated video.
+        #
+        # Root-level fold collisions are NOT resolved here. `__init__` already
+        # compares owners and only contests a genuine disagreement; doing it
+        # here as well marked two *agreeing* files contested, which cost a video
+        # its own filename for no reason. Two top-level files whose stems fold
+        # together cannot coexist on this machine's filesystem anyway — but on a
+        # case-sensitive volume they can, and then one rule is right and two are
+        # not.
         owners: dict[str, str] = {}
         for path in sorted(root.glob("*.md")):
-            key = _fold(path.stem)
-            owner = cls._owner_in(path, resolved_root)
-            owners[path.stem] = "" if key in {_fold(s) for s in owners} else owner
+            owners[path.stem] = cls._owner_in(path, resolved_root)
 
         claimed = {_fold(s) for s in owners}
         for sub in subdirs:
