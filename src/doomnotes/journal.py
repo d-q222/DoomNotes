@@ -67,6 +67,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _ends_mid_line(path: Path) -> bool:
+    """Whether `path` exists and its last byte is not a newline.
+
+    One seek and one byte, so it costs nothing at open time. Unreadable or
+    absent counts as "fine": the caller is about to try opening it anyway and
+    will report that failure properly.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
 class NullJournal:
     """Records nothing. The default, so nothing depends on journalling working."""
 
@@ -103,11 +120,21 @@ class RunJournal:
             f"{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.getpid():d}"
         )
         self._fh = None
-        self._needs_newline = False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Checked against the FILE, not carried in memory. The guard against
+            # a torn line has to survive the process that tore it: a run killed
+            # with SIGKILL, or one whose final flush failed, leaves an
+            # unterminated last line, and the next run appends straight onto it.
+            # That silently loses the new run's opening record — and if the torn
+            # line was a `run_finished`, a completed batch reads back as one that
+            # never finished, which is the one distinction this file exists to
+            # preserve. Runs are separate processes days apart, so inheriting a
+            # torn file is the ordinary case, not an exotic one.
+            self._needs_newline = _ends_mid_line(self.path)
             self._fh = self.path.open("a", encoding="utf-8")
         except OSError as exc:
+            self._needs_newline = False
             log.warning("run journal unavailable at %s: %s", self.path, exc)
 
     def write(self, event: str, **fields: Any) -> None:

@@ -509,3 +509,22 @@ def test_journal_can_read_a_log_the_run_command_would_refuse_to_write(
     # ...but journal still reads what is already there.
     assert main(["-c", str(bad), "journal"]) == 0
     assert "r1" in capsys.readouterr().out
+
+
+def test_journal_reports_an_unreadable_log_rather_than_crashing(env, capsys) -> None:
+    """Every other guard failure in this CLI prints a line and returns 2.
+
+    Reporting it as "no runs recorded yet" would be worse than the traceback,
+    because it reads as "nothing has happened" when something has.
+    """
+    import os
+
+    log = env["data"] / "logs" / "runs.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"run_id": "r1", "event": "run_started"}\n', encoding="utf-8")
+    os.chmod(log, 0o000)
+    try:
+        assert run_cli(env, "journal") == 2
+        assert "could not read the run journal" in capsys.readouterr().err
+    finally:
+        os.chmod(log, 0o600)

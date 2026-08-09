@@ -426,3 +426,69 @@ def test_the_context_manager_does_not_divert_a_runs_exit_path(tmp_path: Path) ->
     with RunJournal(path, run_id="r1") as journal:
         journal._fh = RefusesToClose()  # type: ignore[assignment]
         journal.write("run_started")
+
+
+def test_a_file_torn_by_a_previous_process_does_not_eat_the_next_runs_record(
+    tmp_path: Path,
+) -> None:
+    """The newline guard has to survive the process that tore the file.
+
+    Runs are separate processes days apart, so inheriting a torn log is the
+    ordinary case: a run killed with SIGKILL, or one whose final flush failed,
+    leaves an unterminated last line. Held only in memory, the guard is reset
+    by the next `RunJournal(path)` and the new run's opening record fuses onto
+    the old tail — lost with no exception and no warning, because that run's
+    own write succeeded from its own point of view.
+    """
+    path = tmp_path / "runs.jsonl"
+    path.write_text(
+        '{"ts": "T0", "run_id": "run1", "event": "run_started", "queued": 5}\n'
+        '{"ts": "T0", "run_id": "run1", "event": "video", "n": 1, "status": "written"}\n'
+        '{"ts": "T0", "run_id": "run1", "event": "video", "n": 2, "stat',
+        encoding="utf-8",
+    )
+
+    with RunJournal(path, run_id="run2") as j:
+        j.write("run_started", queued=3)
+        j.write("video", n=1, status="written")
+
+    events = [(r.get("run_id"), r.get("event")) for r in read_runs(path)]
+    assert ("run2", "run_started") in events
+    assert ("run2", "video") in events
+    assert ("run1", "run_started") in events, "the intact earlier records survive too"
+
+
+def test_a_torn_run_finished_does_not_make_the_next_run_unreadable(tmp_path: Path) -> None:
+    """A torn `run_finished` is the worst line to lose to a fused write.
+
+    "No run_finished record" is the system's way of saying the process did not
+    reach the end — a different thing from a batch that completed with
+    failures. Letting the next run's opening record vanish into that tear
+    corrupts the distinction in both directions at once.
+    """
+    path = tmp_path / "runs.jsonl"
+    path.write_text(
+        '{"ts": "T0", "run_id": "r1", "event": "run_started"}\n'
+        '{"ts": "T0", "run_id": "r1", "event": "run_fini',
+        encoding="utf-8",
+    )
+    with RunJournal(path, run_id="r2") as j:
+        j.write("run_started")
+        j.write("run_finished", attempted=0)
+
+    r2 = [r for r in read_runs(path) if r.get("run_id") == "r2"]
+    assert [r["event"] for r in r2] == ["run_started", "run_finished"]
+
+
+def test_an_empty_or_absent_log_needs_no_newline_guard(tmp_path: Path) -> None:
+    """No leading blank line on a fresh log."""
+    path = tmp_path / "runs.jsonl"
+    with RunJournal(path, run_id="r1") as j:
+        j.write("run_started")
+    assert not path.read_text(encoding="utf-8").startswith("\n")
+
+    path2 = tmp_path / "empty.jsonl"
+    path2.touch()
+    with RunJournal(path2, run_id="r1") as j:
+        j.write("run_started")
+    assert not path2.read_text(encoding="utf-8").startswith("\n")

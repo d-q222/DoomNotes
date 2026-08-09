@@ -246,7 +246,14 @@ def cmd_journal(args, cfg) -> int:
         print("journalling is off — set paths.run_log in config.toml")
         return 0
 
-    records = read_runs(path)
+    try:
+        records = read_runs(path)
+    except OSError as exc:
+        # An unreadable journal is a real problem worth naming. Reporting it as
+        # "no runs recorded yet" would be worse than the traceback it replaces.
+        print(f"could not read the run journal at {path}: {exc}", file=sys.stderr)
+        return 2
+
     if not records:
         print(f"no runs recorded yet at {path}")
         return 0
