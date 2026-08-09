@@ -258,8 +258,16 @@ def test_check_auth_shows_the_tiktok_url_form_a_real_run_will_request(env, capsy
     """
     run_cli(env, "check-auth")
     out = capsys.readouterr().out
-    assert "https://www.tiktok.com/@_/video/<id>" in out
+    assert "https://www.tiktok.com/@_/video/<ID>" in out
     assert "fetch_url" in out, "and how to revert it if the probe says otherwise"
+
+
+def test_check_auth_gives_a_pasteable_url_template_per_platform(env, capsys) -> None:
+    """The probe is copy-pasted at 8am. Ambiguity there costs real time."""
+    run_cli(env, "check-auth")
+    out = capsys.readouterr().out
+    assert "https://www.instagram.com/reel/<SHORTCODE>/" in out
+    assert "https://www.tiktok.com/@_/video/<ID>" in out
 
 
 def test_run_reports_dropped_manual_urls_rather_than_failing_them(env, capsys) -> None:

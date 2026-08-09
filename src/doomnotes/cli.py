@@ -197,24 +197,32 @@ def cmd_check_auth(args, cfg) -> int:
     print("Run these by hand, one at a time, and read the errors:\n")
     # Deliberately placeholders, not real URLs. A real shortcode here would be
     # a real saved post committed to a repository.
-    for platform, example in (
-        ("instagram", "<paste a /reel/ URL — `doomnotes parse` lists them>"),
-        ("tiktok", "<paste the numeric id from a tiktokv.com/share/video/ URL>"),
+    for platform, example, note in (
+        (
+            "instagram",
+            "https://www.instagram.com/reel/<SHORTCODE>/",
+            "<SHORTCODE> — copy one from `doomnotes parse`",
+        ),
+        (
+            "tiktok",
+            "https://www.tiktok.com/@_/video/<ID>",
+            "<ID> — the digits from a tiktokv.com/share/video/<ID>/ link. "
+            "Not a typo, see below",
+        ),
     ):
         auth = cfg.get("auth", platform, default={}) or {}
         browser = auth.get("browser", "chrome")
-        print(f"  # {platform}")
+        print(f"  # {platform}    {note}")
         print(f"  yt-dlp --cookies-from-browser {browser} -f 'ba/b' -x \\")
         print(f"    '{example}' -o 'data/authtest-{platform}.%(ext)s'\n")
 
-    print("Note on the TikTok URL. yt-dlp has no extractor for the")
-    print("www.tiktokv.com/share/video/ host the export uses, so it would fall")
-    print("through to the generic extractor and rely on a redirect. The")
-    print("pipeline therefore requests yt-dlp's own canonical form instead:")
+    print("Why the TikTok URL above is not the one in your export. yt-dlp has")
+    print("no extractor for the www.tiktokv.com host the export uses — it falls")
+    print("through to the generic extractor and relies on a redirect. A real")
+    print("run therefore requests `https://www.tiktok.com/@_/video/<ID>`, which")
+    print("is yt-dlp's own form for an unknown uploader. Probing that form is")
+    print("what makes this test what a batch will actually do.")
     print()
-    print("    https://www.tiktok.com/@_/video/<id>")
-    print()
-    print("Use that form above, so this probe tests what a real run will do.")
     print("If it fails and the share URL works, revert `fetch_url` in")
     print("download.py to return ref.url — nothing else depends on it.\n")
     print("Success = an audio file on disk. On failure, fall back to an")
