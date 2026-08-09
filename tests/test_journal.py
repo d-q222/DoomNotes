@@ -222,22 +222,47 @@ def test_a_systemic_outage_is_visible_as_one_shared_cause(vault: Path, tmp_path:
 
 
 def test_journalling_does_not_change_the_runs_outcome(vault: Path, tmp_path: Path) -> None:
-    """Run the same batch twice, with and without a journal, and compare."""
+    """Run the same batch twice, with and without a journal, and compare.
+
+    Compares STORE STATE and the files on disk, not just the RunResult
+    counters. Those counters are incremented unconditionally in the loop, so
+    they stay identical even if journalling changed whether `mark_done` fired —
+    a reviewer proved that by gating `store.mark_done` on `journal is None` and
+    watching all 280 tests still pass. The store is what decides whether a
+    video is ever offered again, so it is the thing that has to match.
+    """
     refs = [
         replace(IG, url=f"https://www.instagram.com/reel/BBBBBBBBB{i:02d}/", source_order=i)
         for i in range(3)
     ]
-    without = do_run(refs, vault, tmp_path / "a", journal=None)
 
-    (tmp_path / "b").mkdir(parents=True, exist_ok=True)
-    second_vault = tmp_path / "b" / "vault"
-    second_vault.mkdir()
+    def one_run(root: Path, journal) -> tuple:
+        root.mkdir(parents=True, exist_ok=True)
+        vault_dir = root / "vault"
+        vault_dir.mkdir()
+        with Store(root / "state.db") as store:
+            result = run(
+                refs,
+                store=store,
+                writer=VaultWriter(vault_dir),
+                registry=TagRegistry(),
+                deps=deps(),
+                audio_dir=root / "audio",
+                auth_for=lambda p: {},
+                sleep_range=None,
+                journal=journal,
+            )
+            states = {r.url: store.state_of(r.url) for r in refs}
+            # The load-bearing one: a second run must offer the same thing.
+            requeued = [r.url for r in store.queue(refs)]
+        notes = sorted(p.name for p in vault_dir.glob("*.md"))
+        return (result.attempted, result.notes_written, result.failed), states, requeued, notes
+
+    without = one_run(tmp_path / "a", None)
     with RunJournal(tmp_path / "runs.jsonl", run_id="r1") as journal:
-        with_journal = do_run(refs, second_vault, tmp_path / "b", journal=journal)
+        with_journal = one_run(tmp_path / "b", journal)
 
-    assert (without.attempted, without.notes_written, without.failed) == (
-        with_journal.attempted, with_journal.notes_written, with_journal.failed
-    )
+    assert without == with_journal
 
 
 def test_a_stop_is_recorded_before_the_run_halts(vault: Path, tmp_path: Path) -> None:

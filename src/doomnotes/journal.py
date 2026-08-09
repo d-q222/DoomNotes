@@ -229,7 +229,16 @@ def read_runs(path: str | os.PathLike[str]) -> list[dict]:
         if not line:
             continue
         try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
+            record = json.loads(line)
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError needs deeply nested JSON, which a torn write can
+            # never produce — a tear truncates a flat record. It is caught
+            # anyway because the promise made above is "a bad line is dropped",
+            # and a promise with an exception nobody can name is not one.
             continue
+        # The signature says list[dict], so make that true here rather than
+        # leaving every caller to re-derive it. A valid-JSON line that is not
+        # an object is not a record.
+        if isinstance(record, dict):
+            out.append(record)
     return out
