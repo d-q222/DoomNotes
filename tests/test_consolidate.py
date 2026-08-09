@@ -170,6 +170,26 @@ def test_unrelated_words_sharing_a_prefix_stay_separate(pair: tuple[str, str]) -
     assert merged == {}, f"{pair} should not merge, got {merged}"
 
 
+@pytest.mark.xfail(
+    reason="TIER-1 #3, undecided: the similarity rule merges `compose` into "
+           "`compost` (0.857 against a 0.85 threshold) and `composing` into "
+           "`composting` (0.947). Both live in THIS vault — `compose` from "
+           "docker-compose, `compost` from gardening — so the false merge is "
+           "specific rather than theoretical.\n"
+           "Not a regression: identical before and after the equivalence-group "
+           "rewrite, and identical on main. Left undecided because the fix is "
+           "a judgement about tag semantics, not a bug: raising the threshold "
+           "does not help (`composing`/`composting` scores 0.947), so the real "
+           "question is whether edit-distance similarity earns its place next "
+           "to the derivational rule at all, or should be dropped so only "
+           "morphology merges.",
+    strict=True,
+)
+def test_similar_spellings_from_different_domains_stay_separate() -> None:
+    assert plan_merges({"compose": 6, "compost": 5}) == {}
+    assert plan_merges({"composing": 6, "composting": 5}) == {}
+
+
 def test_merge_target_is_the_most_used_variant() -> None:
     """Canonical = most used, so consolidation follows your actual vocabulary."""
     merges = plan_merges({"plant": 2, "plants": 11})

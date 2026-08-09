@@ -9,7 +9,7 @@ import pytest
 
 from doomnotes.consolidate import consolidate, plan_merges, plan_splits
 from doomnotes.models import Note
-from doomnotes.render import SlugIndex, note_slug, render_note, render_transcript, slugify
+from doomnotes.render import SlugIndex, note_slug, url_hash, render_note, render_transcript, slugify
 from doomnotes.tags import TagRegistry, normalise_tag
 from doomnotes.vault import VaultWriter
 
@@ -339,3 +339,72 @@ def test_a_third_video_with_the_same_title_does_not_reuse_the_second_ones_name()
         for c in ("AAA", "BBB", "CCC", "DDD")
     ]
     assert len(set(slugs)) == 4, slugs
+
+
+def test_a_hash_suffixed_name_is_checked_too_not_assumed_free() -> None:
+    """A six-hex suffix is short enough to be someone else's actual title.
+
+    `<base>-<6 hex>` is a perfectly ordinary slug for a note titled e.g.
+    "Foo 0467e6", so appending a hash and writing without looking would
+    overwrite a real note — the exact failure this class exists to prevent.
+    Widening is deterministic, so the URL still resolves to one stable name.
+    """
+    url_b = "https://www.instagram.com/reel/BBB/"
+    index = SlugIndex({
+        "foo": "https://www.instagram.com/reel/AAA/",
+        f"foo-{url_hash(url_b)}": "https://www.instagram.com/reel/CCC/",
+    })
+    slug = index.claim(make_note(title="Foo", source_url=url_b))
+    assert slug not in ("foo", f"foo-{url_hash(url_b)}")
+    assert slug.startswith("foo-")
+
+
+def test_the_same_video_keeps_one_file_when_its_title_drifts() -> None:
+    """Titles are model output and are not stable across runs.
+
+    Reprocessing one URL must not leave two notes carrying that `source_url`.
+    Nothing in the system reconciles that afterwards — `consolidate` merges
+    tags, never notes — so the duplicate would simply stay.
+
+    The cost is a filename reflecting the older title. That is cosmetic; the
+    frontmatter and body are rewritten, and it is the behaviour the URL-derived
+    hash was chosen for in the first place.
+    """
+    url = "https://www.instagram.com/reel/AAA/"
+    index = SlugIndex()
+    first = index.claim(make_note(title="Foo", source_url=url))
+    second = index.claim(make_note(title="A completely different title", source_url=url))
+    assert first == second == "foo"
+
+
+def test_a_video_reclaims_its_slug_from_its_own_orphaned_transcript(tmp_path: Path) -> None:
+    """`write_pair` lands the transcript first, so a kill in between orphans one.
+
+    Reading only the transcript's *name* would make it an unknown owner, and
+    the retry of the very video that owns the slug would then be suffixed away
+    from its own filename — stranding the orphan for good. The transcript
+    carries a source_url precisely so the owner can be read.
+    """
+    root = tmp_path / "ai-notes-vault"
+    (root / "_transcripts").mkdir(parents=True)
+    url = "https://www.instagram.com/reel/AAA/"
+    (root / "_transcripts" / "foo.md").write_text(
+        f'---\ntitle: "Foo (transcript)"\nsource_url: {url}\nkind: transcript\n---\n\nasr\n',
+        encoding="utf-8",
+    )
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    assert index.claim(make_note(title="Foo", source_url=url)) == "foo"
+
+
+def test_an_orphaned_transcript_from_a_different_video_still_blocks(tmp_path: Path) -> None:
+    """The other direction: reading owners must not make orphans free-for-all."""
+    root = tmp_path / "ai-notes-vault"
+    (root / "_transcripts").mkdir(parents=True)
+    (root / "_transcripts" / "foo.md").write_text(
+        '---\ntitle: "Foo (transcript)"\nsource_url: https://www.instagram.com/reel/AAA/\n'
+        "kind: transcript\n---\n\nasr\n",
+        encoding="utf-8",
+    )
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    slug = index.claim(make_note(title="Foo", source_url="https://www.instagram.com/reel/BBB/"))
+    assert slug != "foo"

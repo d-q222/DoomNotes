@@ -53,9 +53,7 @@ def note_slug(note: Note, taken: "set[str] | SlugIndex | None" = None) -> str:
     if taken is None:
         return base
     if isinstance(taken, SlugIndex):
-        return base if taken.owner_of(base) in (None, note.source_url) else (
-            f"{base}-{url_hash(note.source_url)}"
-        )
+        return taken.allocate(base, note.source_url)
     if base not in taken:
         return base
     return f"{base}-{url_hash(note.source_url)}"
@@ -79,19 +77,40 @@ class SlugIndex:
 
     Collapsing them either loses a note (always reuse) or accumulates a
     duplicate on every re-run (always suffix).
+
+    It is indexed both ways. slug -> owner answers "may I have this name"; the
+    reverse, owner -> slug, answers "do I already have one", which matters
+    because a video's title is model output and is not stable across runs. The
+    same URL summarised twice can produce two different titles, and without the
+    reverse lookup the second run has no way to discover it already owns a file
+    — so the vault ends up with two notes carrying the same `source_url` and
+    nothing to reconcile them.
     """
 
     def __init__(self, owners: dict[str, str] | None = None) -> None:
         self._owners: dict[str, str] = dict(owners or {})
+        self._by_url: dict[str, str] = {}
+        for slug, url in self._owners.items():
+            if url:
+                self._by_url.setdefault(url, slug)
 
     @classmethod
     def from_vault(cls, root: str | Path, *, subdirs: tuple[str, ...] = ()) -> "SlugIndex":
         """Read every note already in the vault and record who owns its slug.
 
-        Only the top level is scanned: `_transcripts/` mirrors note slugs by
-        construction, and `_meta/` holds no notes. A note without a readable
-        `source_url` still reserves its slug — it is someone's note, and the
-        conservative reading is that overwriting it would lose something.
+        Notes are scanned at the top level; `_meta/` holds no notes. A note
+        without a readable `source_url` still reserves its slug — it is
+        someone's note, and the conservative reading is that overwriting it
+        would lose something.
+
+        Transcripts are scanned too, and their frontmatter is read rather than
+        just their names. `write_pair` deliberately lands the transcript first
+        so a wikilink can never dangle, which means a run killed in between
+        leaves a transcript with no note. Recording only the name would make
+        that orphan an *unknown* owner, so the retry of the very video that owns
+        the slug would read it as a collision and get suffixed away from its own
+        filename — leaving the orphan stranded permanently. `render_transcript`
+        writes a `source_url`, so the owner is right there to be read.
         """
         root = Path(root)
         resolved_root = root.resolve(strict=False)
@@ -100,7 +119,8 @@ class SlugIndex:
             owners[path.stem] = cls._owner_in(path, resolved_root)
         for sub in subdirs:
             for path in sorted((root / sub).glob("*.md")):
-                owners.setdefault(path.stem, "")
+                if path.stem not in owners:
+                    owners[path.stem] = cls._owner_in(path, resolved_root)
         return cls(owners)
 
     @staticmethod
@@ -130,10 +150,57 @@ class SlugIndex:
         """The URL that owns `slug`, `""` if unknown, or None if it is free."""
         return self._owners.get(slug)
 
+    def slug_for_url(self, url: str) -> str | None:
+        """The slug this URL already owns, if it owns one."""
+        return self._by_url.get(url) if url else None
+
+    def _free_for(self, slug: str, url: str) -> bool:
+        owner = self._owners.get(slug)
+        return owner is None or owner == url
+
+    def allocate(self, base: str, url: str) -> str:
+        """The filename `url` should use, given a slug derived from its title.
+
+        Three cases, in order:
+
+        1. **This URL already owns a file.** Reuse that name, even though the
+           title may have drifted since. Writing a second file would leave two
+           notes carrying one `source_url` and nothing in the system able to
+           reconcile them — `consolidate` merges tags, never notes. Reusing is
+           also what the URL-derived hash was for: re-running a video lands on
+           its existing file rather than accumulating copies.
+
+        2. **The base name is free, or already ours.** Take it.
+
+        3. **Another video holds it.** Append this URL's hash — and then check
+           *that* name too, rather than trusting it. A six-hex-character suffix
+           is not guaranteed unique against a note whose own title happens to
+           slugify to `<base>-<6 hex>`, and an unchecked claim there overwrites
+           a real note, which is the exact failure this class exists to stop.
+           Widening the hash is deterministic, so a given URL still resolves to
+           the same filename on every run.
+        """
+        existing = self.slug_for_url(url)
+        if existing is not None:
+            return existing
+
+        if self._free_for(base, url):
+            return base
+
+        for length in (6, 8, 12, 16, 32, 64):
+            candidate = f"{base}-{url_hash(url, length)}"
+            if self._free_for(candidate, url):
+                return candidate
+        # Unreachable short of a full SHA-256 collision, but silently returning
+        # a taken name would mean overwriting someone's note.
+        raise RuntimeError(f"could not allocate a free filename for {base!r}")
+
     def claim(self, note: Note) -> str:
         """Allocate this note's slug and record the claim."""
-        slug = note_slug(note, self)
+        slug = self.allocate(slugify(note.title), note.source_url)
         self._owners[slug] = note.source_url
+        if note.source_url:
+            self._by_url.setdefault(note.source_url, slug)
         return slug
 
     def __contains__(self, slug: object) -> bool:
