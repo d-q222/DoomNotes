@@ -34,6 +34,7 @@ Each module owns one responsibility. Put a change in the module that already own
 | `summarize.py` | the model call and the system prompt |
 | `tags.py` / `consolidate.py` | tag vocabulary; pass 1 injection, pass 2 repair |
 | `render.py` | `Note` → markdown, slugs, wikilinks |
+| `journal.py` | append-only JSONL record of every run — records, never reacts |
 | `vault.py` | **every** filesystem write under the vault |
 | `pipeline.py` | orchestration and failure isolation only |
 

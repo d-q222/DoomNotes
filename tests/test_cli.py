@@ -26,6 +26,7 @@ transcripts_dir = "_transcripts"
 [paths]
 state_db = "{data}/state.db"
 audio_dir = "{data}/audio"
+run_log = "{data}/logs/runs.jsonl"
 
 [pacing]
 batch_cap = 35
@@ -303,3 +304,113 @@ def test_a_failed_registry_write_does_not_hide_why_the_run_ended(env, monkeypatc
     urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="the real reason the run ended"):
         run_cli(env, "run", "--urls", str(urls), "--no-sleep")
+
+
+# ── journal ──────────────────────────────────────────────────────────────
+
+
+def test_journal_on_an_empty_log_says_so(env, capsys) -> None:
+    assert run_cli(env, "journal") == 0
+    assert "no runs recorded" in capsys.readouterr().out
+
+
+def test_journal_groups_failures_by_stage(env, capsys) -> None:
+    """The whole point of 7.2: the run summary says "3 failed"; this says
+    all three failed at the same stage, which is one problem, not three."""
+    from doomnotes.journal import RunJournal
+
+    log = env["data"] / "logs" / "runs.jsonl"
+    with RunJournal(log, run_id="20260809T0300") as j:
+        j.write("run_started", queued=3)
+        for i in range(3):
+            j.write("video", url=f"https://www.instagram.com/reel/AAAAAAAAA{i:02d}/",
+                    status="failed", stage="summarize",
+                    detail="summarize:connection refused", seconds=0.2)
+        j.write("run_finished", attempted=3, failed=3)
+
+    assert run_cli(env, "journal") == 0
+    out = capsys.readouterr().out
+    assert "20260809T0300" in out
+    assert "summarize" in out and "3" in out
+
+
+def test_journal_errors_flag_lists_the_messages(env, capsys) -> None:
+    from doomnotes.journal import RunJournal
+
+    with RunJournal(env["data"] / "logs" / "runs.jsonl", run_id="r1") as j:
+        j.write("run_started", queued=1)
+        j.write("video", url="https://www.instagram.com/reel/AAAAAAAAAAA/",
+                status="failed", stage="download", detail="download:Video unavailable")
+        j.write("run_finished", attempted=1, failed=1)
+
+    run_cli(env, "journal", "--errors")
+    assert "Video unavailable" in capsys.readouterr().out
+
+
+def test_journal_marks_a_run_that_never_finished(env, capsys) -> None:
+    from doomnotes.journal import RunJournal
+
+    with RunJournal(env["data"] / "logs" / "runs.jsonl", run_id="r1") as j:
+        j.write("run_started", queued=5)
+        j.write("video", url="https://www.instagram.com/reel/AAAAAAAAAAA/", status="written")
+
+    run_cli(env, "journal")
+    assert "did not finish" in capsys.readouterr().out
+
+
+def test_a_run_writes_its_journal_under_data_not_the_vault(env) -> None:
+    urls = env["tmp"] / "urls.txt"
+    urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
+    run_cli(env, "run", "--urls", str(urls), "--limit", "0", "--no-sleep")
+
+    assert (env["data"] / "logs" / "runs.jsonl").is_file()
+    assert list(env["vault"].rglob("*.jsonl")) == []
+
+
+def test_journal_shows_where_in_the_run_a_stage_started_failing(env, capsys) -> None:
+    """The signal totals hide, and the reason 7.2 exists.
+
+    "9 failed" reads as nine problems. "9 failed, videos 6-14, unbroken run"
+    reads as one thing breaking at video 6 — which is what a dead Ollama looks
+    like from outside. The command reports it; deciding what to do about it is
+    #7.1's job, not this command's.
+    """
+    from doomnotes.journal import RunJournal
+
+    with RunJournal(env["data"] / "logs" / "runs.jsonl", run_id="r1") as j:
+        j.write("run_started", queued=14)
+        for i in range(1, 15):
+            failed = i >= 6
+            j.write(
+                "video",
+                url=f"https://www.instagram.com/reel/AAAAAAAAA{i:02d}/",
+                status="failed" if failed else "caption_only",
+                stage="summarize" if failed else "caption_only",
+                detail="summarize:connection refused" if failed else None,
+                seconds=0.2,
+            )
+        j.write("run_finished", attempted=14, failed=9)
+
+    run_cli(env, "journal")
+    out = capsys.readouterr().out
+    assert "videos 6-14" in out
+    assert "unbroken run" in out
+
+
+def test_journal_distinguishes_scattered_failures_from_a_run_of_them(env, capsys) -> None:
+    """Nine failures spread across a batch really are nine problems."""
+    from doomnotes.journal import RunJournal
+
+    with RunJournal(env["data"] / "logs" / "runs.jsonl", run_id="r1") as j:
+        j.write("run_started", queued=10)
+        for i in range(1, 11):
+            failed = i % 2 == 0
+            j.write("video", url=f"https://www.instagram.com/reel/AAAAAAAAA{i:02d}/",
+                    status="failed" if failed else "written",
+                    stage="download" if failed else "written", seconds=0.1)
+        j.write("run_finished", attempted=10, failed=5)
+
+    run_cli(env, "journal")
+    out = capsys.readouterr().out
+    assert "scattered" in out
+    assert "unbroken run" not in out

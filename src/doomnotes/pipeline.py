@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from doomnotes.download import DownloadResult, Outcome, download, sleep_seconds
+from doomnotes.journal import Journal, NullJournal
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.render import SlugIndex, render_note, render_transcript
 from doomnotes.store import Store
@@ -168,19 +169,25 @@ def run(
     limit: int | None = None,
     sleep_range: tuple[float, float] | None = None,
     keep_audio: bool = False,
+    journal: "Journal | None" = None,
 ) -> RunResult:
     """Process a batch. Never raises for an individual video."""
     d = deps or Deps()
     out = RunResult()
+    # Records what happened. Deliberately has no say in what happens next —
+    # see journal.py. Defaults to a no-op so nothing depends on it working.
+    jrn = journal or NullJournal()
     # Seeded from the vault, not empty: runs are separate processes days apart,
     # so an in-memory set cannot see notes an earlier run wrote. See SlugIndex.
     taken = SlugIndex.from_vault(writer.root, subdirs=(transcripts_dir,))
 
     store.register(refs)
     batch = store.queue(list(refs), limit)
+    jrn.write("run_started", queued=len(batch), offered=len(refs), limit=limit)
 
     for i, ref in enumerate(batch):
         out.attempted += 1
+        started = time.monotonic()
 
         # ── Naive isolation: one boundary, per video. See the note above.
         try:
@@ -202,6 +209,20 @@ def run(
             log.exception("unhandled failure on %s", ref.url)
             status, detail, path = "failed", f"unhandled:{type(exc).__name__}: {exc}", None
 
+        # `detail` is prefixed with the stage that produced it, so recording it
+        # verbatim is what lets a reader group failures by cause afterwards.
+        jrn.write(
+            "video",
+            url=ref.url,
+            platform=ref.platform,
+            status=status,
+            stage=(detail or "").split(":", 1)[0] or None,
+            detail=detail,
+            note=path.name if path else None,
+            seconds=round(time.monotonic() - started, 3),
+            source_order=ref.source_order,
+        )
+
         if status == "stop":
             out.stopped = True
             out.stop_reason = detail
@@ -222,6 +243,21 @@ def run(
             store.mark_done(ref.url)
 
         if sleep_range and i < len(batch) - 1:
-            time.sleep(sleep_seconds(*sleep_range))
+            slept = sleep_seconds(*sleep_range)
+            # Recorded because #3.3 is a decision about what the request pattern
+            # should look like, and the configured range is not the same thing
+            # as the spacing a run actually produced.
+            jrn.write("slept", seconds=round(slept, 3))
+            time.sleep(slept)
 
+    jrn.write(
+        "run_finished",
+        attempted=out.attempted,
+        notes_written=out.notes_written,
+        caption_only=out.caption_only,
+        failed=out.failed,
+        stopped=out.stopped,
+        stop_reason=out.stop_reason,
+        per_stage_failures=out.per_stage_failures,
+    )
     return out

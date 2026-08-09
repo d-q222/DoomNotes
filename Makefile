@@ -68,6 +68,10 @@ isolation: ## prove the write guard refuses the main vault
 status: ## what the store considers processed
 	@$(PY) -m doomnotes.cli status
 
+.PHONY: journal
+journal: ## what recent runs actually did (task 7.2)
+	@$(PY) -m doomnotes.cli journal --last 3
+
 .PHONY: consolidate
 consolidate: ## tag pass 2 (merge + sub-cluster split)
 	@$(PY) -m doomnotes.cli consolidate --dry-run

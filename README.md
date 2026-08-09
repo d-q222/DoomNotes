@@ -103,6 +103,7 @@ src/doomnotes/
   tags.py                registry read/write, prompt injection
   consolidate.py         merge + sub-cluster split
   render.py              Note -> markdown, slugs, wikilinks
+  journal.py             append-only JSONL record of every run
   vault.py               write guard + atomic write
   pipeline.py            orchestration, stage isolation
   cli.py                 doomnotes {parse,run,status,consolidate,check-auth}
