@@ -95,8 +95,15 @@ class RunJournal:
 
     def __init__(self, path: str | os.PathLike[str], run_id: str | None = None) -> None:
         self.path = Path(path).expanduser()
-        self.run_id = run_id or datetime.now().strftime("%Y%m%dT%H%M%S")
+        # The pid disambiguates two runs started in the same second — a quick
+        # restart after Ctrl-C, or two terminal tabs. Without it they share an
+        # id, and a reader merges two unrelated batches into one "run" whose
+        # totals belong to neither.
+        self.run_id = run_id or (
+            f"{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.getpid():d}"
+        )
         self._fh = None
+        self._needs_newline = False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._fh = self.path.open("a", encoding="utf-8")
@@ -108,11 +115,30 @@ class RunJournal:
             return
         record = {"ts": _now(), "run_id": self.run_id, "event": event, **fields}
         try:
-            # One line, flushed immediately. A run killed mid-batch should still
-            # have every video it finished, not a buffer that never landed.
-            self._fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+            line = json.dumps(record, default=str, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001 - a logger must never raise
+            # `default=str` does not cover everything: a circular reference
+            # raises before it is consulted, and a lone surrogate fails at
+            # encode time. Neither is reachable from today's callers, but a
+            # journal that can abort a rate-limited batch is the one outcome
+            # this module exists to avoid.
+            log.warning("could not serialise journal record %s: %s", event, exc)
+            return
+
+        try:
+            # A previous write may have failed partway through, leaving an
+            # unterminated line. Prefixing a newline costs one blank line and
+            # keeps the torn record from swallowing this one too — otherwise
+            # both are lost, not just the torn one.
+            self._fh.write(("\n" if self._needs_newline else "") + line + "\n")
+            self._needs_newline = False
+            # Flushed per record, so a killed PROCESS still has every video it
+            # finished — the bytes are in the kernel's hands. Deliberately not
+            # fsync'd: that would only additionally cover a power loss or kernel
+            # panic, which is not the failure this is protecting against.
             self._fh.flush()
-        except (OSError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - a logger must never raise
+            self._needs_newline = True
             log.warning("could not journal %s: %s", event, exc)
 
     def close(self) -> None:

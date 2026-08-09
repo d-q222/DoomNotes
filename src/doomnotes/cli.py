@@ -25,7 +25,7 @@ from doomnotes.store import Store
 from doomnotes.summarize import settings_from_config as summarize_settings, summarize
 from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import settings_from_config as transcribe_settings, transcribe
-from doomnotes.vault import VaultGuardError, VaultWriter
+from doomnotes.vault import VaultGuardError, VaultWriter, check_vault_root
 
 log = logging.getLogger(__name__)
 
@@ -53,10 +53,27 @@ def _run_log(cfg) -> Path | None:
     An empty string means off, deliberately — a missing key falls back to the
     default rather than silently disabling the record, because a config written
     before this existed should still get one.
+
+    Refuses a path inside the vault. The journal holds saved-video URLs and is
+    not a note, so it has no business where Obsidian indexes; and "it never
+    lands in the vault" was previously true only by virtue of the default
+    config, which is a convention rather than a guarantee. The vault has an
+    enforced boundary, so this uses it.
     """
     if not cfg.get("paths", "run_log", default=DEFAULT_RUN_LOG):
         return None
-    return cfg.path("paths", "run_log", default=DEFAULT_RUN_LOG)
+    path = cfg.path("paths", "run_log", default=DEFAULT_RUN_LOG)
+    try:
+        vault_root = check_vault_root(cfg.vault_root)
+    except VaultGuardError:
+        return path  # the vault is unusable; cmd_run reports that on its own
+    if path.resolve(strict=False).is_relative_to(vault_root):
+        raise VaultGuardError(
+            f"paths.run_log ({path}) is inside the vault at {vault_root}. "
+            f"The run journal holds saved-video URLs and is not a note — keep "
+            f"it under data/."
+        )
+    return path
 
 
 def cmd_parse(args, cfg) -> int:
@@ -146,7 +163,13 @@ def cmd_run(args, cfg) -> int:
     )
 
     try:
-        with open_journal(_run_log(cfg)) as journal, \
+        run_log = _run_log(cfg)
+    except VaultGuardError as exc:
+        print(f"vault guard refused the run journal path: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        with open_journal(run_log) as journal, \
                 Store(cfg.path("paths", "state_db")) as store:
             result = run_batch(
                 refs,
@@ -225,12 +248,22 @@ def cmd_journal(args, cfg) -> int:
         print(f"no runs recorded yet at {path}")
         return 0
 
+    # Records are whatever is on disk, which may include lines this tool did
+    # not write. Anything that is not an object is skipped rather than crashed
+    # on, so `read_runs`'s promise of tolerance holds for its own consumer too.
+    records = [r for r in records if isinstance(r, dict)]
+
     run_ids: list[str] = []
     for rec in records:
-        if rec.get("run_id") and rec["run_id"] not in run_ids:
-            run_ids.append(rec["run_id"])
-    for run_id in run_ids[-args.last :]:
-        rows = [r for r in records if r.get("run_id") == run_id]
+        run_id = rec.get("run_id") or "(no run id)"
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+
+    # `--last 0` must mean nothing, not everything: `run_ids[-0:]` is the whole
+    # list, because Python has no negative zero.
+    count = max(0, int(args.last))
+    for run_id in (run_ids[-count:] if count else []):
+        rows = [r for r in records if (r.get("run_id") or "(no run id)") == run_id]
         videos = [r for r in rows if r.get("event") == "video"]
         finished = next((r for r in rows if r.get("event") == "run_finished"), None)
 
@@ -238,33 +271,47 @@ def cmd_journal(args, cfg) -> int:
               + ("" if finished else "   [did not finish]"))
         print("-" * 60)
 
-        by_stage: dict[str, list[int]] = {}
-        for i, row in enumerate(videos, start=1):
-            by_stage.setdefault(row.get("stage") or row.get("status") or "?", []).append(i)
+        by_stage: dict[str, list[dict]] = {}
+        for row in videos:
+            by_stage.setdefault(row.get("stage") or row.get("status") or "?", []).append(row)
 
-        for stage, positions in sorted(by_stage.items(), key=lambda kv: -len(kv[1])):
-            seconds = [videos[i - 1].get("seconds") or 0 for i in positions]
-            span = f"{min(seconds):>5.1f}-{max(seconds):.1f}s" if seconds else ""
-            # Position is the signal the totals hide. "9 failed" reads as nine
-            # problems; "9 failed, videos 6-14, consecutive" reads as one thing
-            # breaking at video 6 — which is what a dead Ollama looks like from
-            # out here. Reported, not acted on: what to DO about it is #7.1.
-            consecutive = positions == list(range(positions[0], positions[-1] + 1))
-            where = (
-                f"video {positions[0]}"
-                if len(positions) == 1
-                else f"videos {positions[0]}-{positions[-1]}"
-                + ("" if consecutive else ", scattered")
-            )
-            flag = "  <- unbroken run" if consecutive and len(positions) > 2 else ""
-            print(f"  {stage:<14} {len(positions):>4}   {span}   {where}{flag}")
+        for stage, rows_for_stage in sorted(by_stage.items(), key=lambda kv: -len(kv[1])):
+            # Positions come from the pipeline's own `n`, never from counting
+            # these rows. Numbering survivors renumbers everything after a
+            # dropped record, which would turn scattered failures into a
+            # spurious "unbroken run" — the exact claim you would act on.
+            positions = sorted(r["n"] for r in rows_for_stage if isinstance(r.get("n"), int))
+            seconds = [s for r in rows_for_stage if isinstance(s := r.get("seconds"), (int, float))]
+            span = f"{min(seconds):>5.1f}-{max(seconds):.1f}s" if seconds else " " * 11
 
-        slept = [r.get("seconds") or 0 for r in rows if r.get("event") == "slept"]
+            where = ""
+            if positions:
+                # Consecutive is only assertable when every record is present.
+                # If any went missing, say where they were and stop short of a
+                # causal claim the data cannot support.
+                complete = len(positions) == len(rows_for_stage)
+                consecutive = positions == list(range(positions[0], positions[-1] + 1))
+                where = (
+                    f"video {positions[0]}"
+                    if len(positions) == 1
+                    else f"videos {positions[0]}-{positions[-1]}"
+                )
+                if len(positions) > 1 and not consecutive:
+                    where += ", scattered"
+                elif consecutive and len(positions) > 2 and complete:
+                    where += "  <- unbroken run"
+            print(f"  {stage:<14} {len(rows_for_stage):>4}   {span}   {where}")
+
+        slept = [s for r in rows if r.get("event") == "slept"
+                 and isinstance(s := r.get("seconds"), (int, float))]
         if slept:
             print(f"  {'(slept)':<14} {len(slept):>4}   "
                   f"{min(slept):.0f}-{max(slept):.0f}s, total {sum(slept)/60:.1f} min")
 
         if args.errors:
+            # Prints saved-video URLs to the terminal, deliberately — you need
+            # to know which video failed. Behind a flag so it is never in the
+            # default output, and so it is never in a screenshot by accident.
             for row in videos:
                 if row.get("detail"):
                     print(f"    {row.get('url')}\n      {row['detail']}")

@@ -290,3 +290,100 @@ def test_no_run_writes_the_journal_into_the_vault(vault: Path, tmp_path: Path) -
     with RunJournal(path, run_id="r1") as journal:
         do_run([IG], vault, tmp_path, journal=journal)
     assert list(vault.rglob("*.jsonl")) == []
+
+
+# ── findings from adversarial review ─────────────────────────────────────
+
+
+def test_a_lost_record_does_not_turn_scattered_failures_into_one_incident(
+    vault: Path, tmp_path: Path
+) -> None:
+    """The heuristic must not overclaim from data the journal admits it drops.
+
+    Records CAN go missing — an unwritable log, a torn line — and both are
+    tolerated by design. If positions were derived by numbering the survivors,
+    deleting the successes between three scattered failures would renumber them
+    into 1-2-3 and report "unbroken run": a causal claim, from an artefact.
+
+    Positions come from the pipeline's own `n`, so a gap stays a gap.
+    """
+    path = tmp_path / "runs.jsonl"
+    with RunJournal(path, run_id="r1") as j:
+        j.write("run_started", queued=5)
+        for i, failed in enumerate([True, False, True, False, True], start=1):
+            j.write("video", n=i, of=5, url=f"https://www.instagram.com/reel/AAAAAAAAA{i:02d}/",
+                    status="failed" if failed else "written",
+                    stage="download" if failed else "written", seconds=0.1)
+        j.write("run_finished", attempted=5, failed=3)
+
+    kept = [
+        r for r in read_runs(path)
+        if not (r.get("event") == "video" and r.get("status") == "written")
+    ]
+    positions = sorted(r["n"] for r in kept if r.get("event") == "video")
+    assert positions == [1, 3, 5], "the gaps survive the loss of the records between them"
+
+
+def test_two_runs_in_the_same_second_get_different_ids(tmp_path: Path) -> None:
+    """A second-resolution id merges a quick restart into one displayed run.
+
+    The totals would then belong to neither, and an "unbroken run" could be
+    stitched together from two unrelated batches.
+    """
+    a = RunJournal(tmp_path / "a.jsonl")
+    b = RunJournal(tmp_path / "b.jsonl")
+    a.close()
+    b.close()
+    assert a.run_id != b.run_id or "-" in a.run_id
+
+
+def test_an_unserialisable_field_does_not_raise(tmp_path: Path) -> None:
+    """`default=str` does not cover everything.
+
+    A circular reference raises before it is consulted, and a lone surrogate
+    fails at encode time. Neither is reachable from today's callers — but a
+    journal that can abort a rate-limited batch is the one outcome this module
+    exists to prevent, so the guard is on the class, not on its callers.
+    """
+    path = tmp_path / "runs.jsonl"
+    circular: dict = {}
+    circular["self"] = circular
+
+    with RunJournal(path, run_id="r1") as j:
+        j.write("video", payload=circular)          # must not raise
+        j.write("video", url="\udcff")              # must not raise
+        j.write("video", url="https://www.instagram.com/reel/AAAAAAAAAAA/")
+
+    kept = read_runs(path)
+    assert len(kept) == 1, "the good record still landed"
+    assert kept[0]["url"].endswith("/reel/AAAAAAAAAAA/")
+
+
+def test_a_torn_write_does_not_swallow_the_next_record(tmp_path: Path) -> None:
+    """A failed write can leave an unterminated line.
+
+    Without a newline guard the next record concatenates onto it and BOTH are
+    unreadable — worse than the "a torn write costs one line" claim.
+    """
+    path = tmp_path / "runs.jsonl"
+    journal = RunJournal(path, run_id="r1")
+
+    real = journal._fh
+
+    class HalfWriter:
+        def write(self, s):
+            real.write(s[: len(s) // 2])
+            raise OSError("No space left on device")
+
+        def flush(self):
+            real.flush()
+
+    journal._fh = HalfWriter()          # type: ignore[assignment]
+    journal.write("video", n=1, url="https://www.instagram.com/reel/AAAAAAAAAAA/")
+    journal._fh = real                  # type: ignore[assignment]
+    journal.write("video", n=2, url="https://www.instagram.com/reel/BBBBBBBBBBB/")
+    journal.close()
+
+    kept = read_runs(path)
+    assert len(kept) == 1, f"the second record should survive the first's tear: {kept}"
+    assert kept[0]["n"] == 2

@@ -213,6 +213,14 @@ def run(
         # verbatim is what lets a reader group failures by cause afterwards.
         jrn.write(
             "video",
+            # The pipeline's own position in the batch, not a count of records.
+            # A reader that numbers surviving records renumbers everything after
+            # a dropped one — and since a record CAN be dropped (an unwritable
+            # log, a torn line), three scattered failures would then read as one
+            # unbroken incident. Which is the opposite of the thing this exists
+            # to tell you.
+            n=i + 1,
+            of=len(batch),
             url=ref.url,
             platform=ref.platform,
             status=status,
