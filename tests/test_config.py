@@ -87,6 +87,7 @@ def test_the_repo_config_loads(cfg) -> None:
         ("vault", "transcripts_dir"),
         ("paths", "state_db"),
         ("paths", "audio_dir"),
+        ("paths", "run_log"),
         ("pacing", "batch_cap"),
         ("pacing", "sleep_min_s"),
         ("pacing", "sleep_max_s"),

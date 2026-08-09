@@ -188,8 +188,17 @@ def test_a_systemic_outage_is_visible_as_one_shared_cause(vault: Path, tmp_path:
     not ten bad videos. The run summary cannot say that; `state.db` keeps only
     the latest state per URL. This can.
 
-    Note what is NOT asserted: that the run stopped. It did not, and must not —
-    reacting is #7.1's decision, not the journal's.
+    Note carefully what is NOT asserted: how many videos ran. An earlier
+    version of this test asserted `attempted == 10`, which pinned the naive
+    baseline — the one #7.1 exists to replace — inside a file about logging.
+    Implementing a circuit breaker would then have failed a journal test for no
+    reason the developer could see from its name.
+
+    Only journal-owned properties belong here: that failures were recorded, and
+    that they carry a shared stage. Whether the run should have stopped early
+    is #7.1's to decide, and `test_journalling_does_not_change_the_runs_outcome`
+    is where "the journal changed nothing" is checked — by comparing two runs
+    to each other rather than to a literal.
     """
     refs = [
         replace(IG, url=f"https://www.instagram.com/reel/AAAAAAAAA{i:02d}/", source_order=i)
@@ -201,12 +210,15 @@ def test_a_systemic_outage_is_visible_as_one_shared_cause(vault: Path, tmp_path:
 
     path = tmp_path / "runs.jsonl"
     with RunJournal(path, run_id="r1") as journal:
-        result = do_run(refs, vault, tmp_path, journal=journal, deps=deps(summarizer=dead_ollama))
+        do_run(refs, vault, tmp_path, journal=journal, deps=deps(summarizer=dead_ollama))
 
-    videos = [r for r in read_runs(path) if r["event"] == "video"]
-    assert len(videos) == 10
-    assert {v["stage"] for v in videos} == {"summarize"}
-    assert result.attempted == 10, "journalling must not have changed what the run did"
+    failures = [
+        r for r in read_runs(path) if r["event"] == "video" and r["status"] == "failed"
+    ]
+    assert failures, "the run failed throughout; the journal should say so"
+    assert {v["stage"] for v in failures} == {"summarize"}, (
+        "the shared cause is the whole point — one dead service, not N bad videos"
+    )
 
 
 def test_journalling_does_not_change_the_runs_outcome(vault: Path, tmp_path: Path) -> None:
