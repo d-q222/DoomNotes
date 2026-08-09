@@ -63,10 +63,34 @@ Favourites live at `Likes and Favorites → Favorite Videos → FavoriteVideoLis
 `{"Date", "Link"}` pairs.
 
 **Redirects are deliberately not resolved at parse time.** Resolving `tiktokv.com/share/…`
-would mean one network request per entry just to build a queue — before any pacing logic
-applies, and for no benefit, since yt-dlp follows the redirect itself at download time. The
-numeric video id is already present in the share URL, so a stable dedup key needs no network.
-Parsing stays fully offline.
+would mean one network request per entry just to build a queue, before any pacing logic
+applies. The numeric video id is already present in the share URL, so a stable dedup key
+needs no network. Parsing stays fully offline.
+
+**But the export's URL form is not what gets requested.** An earlier version of this
+document justified the above with "yt-dlp follows the redirect itself at download time".
+That is true only via the generic extractor: checked against yt-dlp 2026.07.04's extractor
+table offline, **no TikTok extractor matches the `tiktokv.com` host**. The URL falls through
+to `GenericIE`, which fetches it, follows the redirect and re-dispatches — an extra request
+per video, and it stakes every TikTok download on the redirect landing somewhere the TikTok
+extractor recognises rather than on a login or consent interstitial.
+
+So identity and fetch are separated. `ref.url` stays exactly as the export wrote it, because
+it is the store's primary key and rewriting it would orphan every existing row. What gets
+requested is `download.fetch_url(ref)`:
+
+```
+store key :  https://www.tiktokv.com/share/video/<id>/
+requested :  https://www.tiktok.com/@_/video/<id>
+```
+
+`@_` is yt-dlp's own convention, not an invention here — `TikTokBaseIE._create_url` emits
+`@{user_id or "_"}` when the uploader is unknown, which is exactly this situation. This
+matters asymmetrically: a failed TikTok download has no export caption to fall back on, so
+it yields no note at all.
+
+Unverifiable without TikTok traffic, by construction. `make check-auth` prints this exact
+form so the manual gate tests what a real run does, and reverting is one line.
 
 ---
 
@@ -202,6 +226,29 @@ note.
 **Note and transcript are written as a pair, with both paths guarded up front**, so a wikilink
 can never dangle and a bad transcript path cannot orphan a note.
 
+### Filenames
+
+The filename is the title slug, with a short hash of the URL appended on collision. The hash
+comes from the URL rather than a counter so that reprocessing one video lands on the same
+filename instead of accumulating `-2`, `-3` copies.
+
+Those two requirements pull against each other, and the tension is the design:
+
+| situation | correct behaviour |
+|---|---|
+| a different video wants this name | suffix it, keep both notes |
+| this video already owns it | reuse it, overwrite in place |
+
+From the filename alone the two are indistinguishable, so the index maps slug → owning
+`source_url` and is **rebuilt from the vault at the start of every run**. Accumulating it in
+memory only ever knew what the current run had written — and since runs are separate processes
+days apart, two videos that generated the same title on different days silently resolved to
+one file, with the store still recording the lost video as done.
+
+A note with no readable `source_url` — anything hand-written — still reserves its slug. An
+unknown owner is treated as "not ours", because the cost of guessing wrong is destroying
+something the user wrote.
+
 ---
 
 ## Consolidation
@@ -216,6 +263,29 @@ and dropped trailing `e`) in addition to a similarity ratio. This is deliberate:
 `gardening` score 0.80 on a sequence matcher, below a sensible threshold, and lowering the
 threshold starts merging genuinely distinct tags. A plain prefix rule would merge `post` into
 `postgres`; a suffix rule does not.
+
+**Both rules build equivalence groups; a canonical is elected once per group.** They are not
+applied in sequence, because that lets the first rule consume the token the second one needs:
+
+```
+{garden: 5, gardens: 2, gardening: 9}  ->  all three collapse            ✅
+{garden: 1, gardens: 2, gardening: 9}  ->  `gardening` is stranded       ❌
+```
+
+Same words, different tallies, different answer — when the plural outnumbers the singular,
+stem-grouping elects `gardens`, and `gardens`/`gardening` is not a derivation, so the bridge
+disappears. Whether two tags merge must depend on the words, not on how often each was used.
+
+That failure was also permanent: once notes had been rewritten from `garden` to `gardens`,
+the bridging form no longer existed in the vault for a later pass to find — which directly
+contradicts this pass being safe to re-run as the vault grows.
+
+**Counts are recomputed from the notes; descriptions are carried across.** The notes are the
+truth about counts, and a stale count is worse than none. Descriptions cannot be derived from
+frontmatter at all, so rebuilding the registry from scratch silently empties them. A canonical
+tag with no description of its own inherits from the most-used tag it absorbed; splits inherit
+nothing, since a nested child is narrower than its parent and would otherwise be handed a
+claim nobody wrote about it.
 
 **Splitting** promotes an oversized tag into Obsidian nested tags using **co-occurrence**: if a
 meaningful share of `coding` notes are also tagged `databases`, that is the sub-cluster, and it
