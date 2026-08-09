@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoomNotes summarization output",
+  "description": "This file is the single source of truth for what the model must return. It is passed verbatim to Ollama's `format` parameter, which compiles it to a llama.cpp grammar — so conformance is a constraint on generation, not a request in the prompt. Tightening a constraint here changes what the model is physically able to emit. Fields NOT listed here (source_url, platform, author, posted_at, saved_at, source_order, processed_at) are never model-generated: they come from the ref and from yt-dlp metadata, because a model asked for a URL will invent one.",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "A human-readable title in sentence case describing what the video is ABOUT, as a person would say it aloud. Not a filename, not hyphenated, not a slug, and not a description of the post itself. Good: 'Postgres partial indexes for soft-deleted rows'. Bad: 'creator-instagram-database-api-caption', 'Instagram caption offers setup link'.",
+      "minLength": 8,
+      "maxLength": 90
+    },
+    "summary": {
+      "type": "string",
+      "description": "2-3 sentences on what the video actually claims or teaches.",
+      "minLength": 20,
+      "maxLength": 700
+    },
+    "key_points": {
+      "type": "array",
+      "description": "Concrete, checkable points. Not a restatement of the summary.",
+      "items": { "type": "string", "minLength": 3, "maxLength": 300 },
+      "minItems": 1,
+      "maxItems": 8
+    },
+    "links": {
+      "type": "array",
+      "description": "Links, products, tools, books or named resources mentioned. Empty array if none — never invent one.",
+      "items": { "type": "string", "maxLength": 300 },
+      "maxItems": 12
+    },
+    "topic": {
+      "type": "string",
+      "description": "Single primary topic. Reuse an existing registry tag when one fits.",
+      "minLength": 2,
+      "maxLength": 40
+    },
+    "tags": {
+      "type": "array",
+      "description": "Up to 5 tags. Prefer existing registry tags; mint a new one only when nothing fits.",
+      "items": { "type": "string", "minLength": 2, "maxLength": 40 },
+      "minItems": 1,
+      "maxItems": 5
+    },
+    "has_speech": {
+      "type": "boolean",
+      "description": "Whether the source material contained actual spoken or written content to summarize, as opposed to the model working from a caption alone."
+    }
+  },
+  "required": ["title", "summary", "key_points", "links", "topic", "tags"],
+  "additionalProperties": false
+}
