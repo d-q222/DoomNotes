@@ -249,6 +249,26 @@ A note with no readable `source_url` — anything hand-written — still reserve
 unknown owner is treated as "not ours", because the cost of guessing wrong is destroying
 something the user wrote.
 
+**Names are compared the way the filesystem compares them, not the way Python does.** macOS
+ships APFS case-insensitive, so `weekly-review-notes.md` and `Weekly-Review-Notes.md` are one
+file. A case-sensitive index believes the lowercase name is free, `os.replace` disagrees, and
+the existing note is destroyed with no error and no suffix. Slugs are always lowercase, so the
+only files this can collide with are ones the pipeline did not write — hand-made notes, or its
+own notes renamed in Obsidian. Exactly the files with no second copy.
+
+**Folding the key space needs a conflict rule.** Once names are compared case-insensitively,
+pairs that used to be distinct collide, and letting the last one win turns the safety
+mechanism into the bug it was added to prevent. Two names that fold together but disagree
+about their owner are marked **contested** — occupied, attribution unknown — so nobody gets
+the fast path to that name and every claimant is suffixed away. Losing a filename is
+recoverable; losing the note under it is not.
+
+Frontmatter is parsed as a block and then searched, rather than scanned for from the top of
+the file. A regex reaching for `source_url:` looks anchored but walks straight past the
+closing `---`, so an unindented `source_url:` line in a note's *body* reads as that note's
+owner. Quotes are stripped, because Obsidian's Properties editor re-saves the value quoted and
+a note would otherwise stop recognising itself the moment it was opened.
+
 ---
 
 ## Consolidation
