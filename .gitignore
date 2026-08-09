@@ -1,0 +1,69 @@
+# ─── Secrets. Nothing here should ever exist in the repo, but defence in depth.
+# The real protection is that cookies live at ~/.config/vidnotes/, OUTSIDE this
+# repo entirely — gitignored-but-present is not the same as absent.
+*cookies*.txt
+*cookies*.json
+*.cookies
+cookies/
+.env
+.env.*
+*.pem
+*.key
+secrets.toml
+
+# ─── Personal working docs. Written FOR Daniel, not for readers of this repo:
+# morning briefs, the HANDS-ON checklist, the teaching walkthrough, session
+# handoffs. The repo's own docs should be outward-facing; these are not.
+private/
+
+# ─── Your actual saved-video data. Never published.
+# state.db holds every saved URL; data/ holds audio, logs and raw run traces.
+# Together they are a map of what you save and watch, plus 300+ third-party
+# creator handles. Code and docs go to GitHub; this does not.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ─── Platform exports (large, and personal in the same way as above).
+saved_posts.html
+saved_collections.html
+user_data_tiktok.json
+exports/
+instagram-*/
+
+# ─── Audio / video artefacts
+*.m4a
+*.mp3
+*.mp4
+*.webm
+*.wav
+*.opus
+
+# ─── The vault itself, if it is ever symlinked or copied in
+ai-notes-vault/
+vault/
+_transcripts/
+_meta/
+
+# ─── Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ─── Models / caches
+*.bin
+*.gguf
+.cache/
+
+# ─── macOS
+.DS_Store

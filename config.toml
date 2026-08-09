@@ -1,0 +1,75 @@
+# DoomNotes configuration.
+#
+# Cookies are NOT configured here as values — only as paths. A session cookie is
+# a bearer credential equivalent to a logged-in session on the account, and 2FA
+# does not protect it. It lives at ~/.config/doomnotes/cookies.txt, chmod 600,
+# outside this repo and outside any synced directory.
+
+[vault]
+# The write guard refuses any root inside ~/Library/Mobile Documents, which is
+# where the main vault lives. Changing this line cannot break that.
+path = "~/Documents/ai-notes-vault"
+transcripts_dir = "_transcripts"
+meta_dir = "_meta"
+
+[paths]
+data_dir = "data"                 # audio/, logs/, state.db — gitignored
+state_db = "data/state.db"
+audio_dir = "data/audio"
+
+[pacing]
+# Deliberately naive — see the pacing note in download.py
+batch_cap = 35                    # videos per run, across both queues
+sleep_min_s = 20
+sleep_max_s = 90
+# Instagram first: larger set, and its captions salvage failed downloads.
+queue_order = ["instagram", "tiktok"]
+
+[auth.instagram]
+# "browser" tries --cookies-from-browser (may prompt Keychain);
+# "file" uses cookies_file; "none" runs unauthenticated.
+mode = "browser"
+browser = "chrome"
+cookies_file = "~/.config/doomnotes/cookies.txt"
+
+[auth.tiktok]
+# Per-platform on purpose: TikTok may land on a different answer than Instagram.
+mode = "browser"
+browser = "chrome"
+cookies_file = "~/.config/doomnotes/cookies_tiktok.txt"
+
+[download]
+timeout_s = 180
+max_attempts = 3                  # naive default — see the taxonomy note in download.py
+audio_format = "m4a"
+
+[transcribe]
+# faster-whisper (CTranslate2) has no Metal backend — this runs on CPU.
+# Untuned — run `make benchmark-whisper` before trusting this default
+model = "base.en"
+device = "cpu"
+compute_type = "int8"
+beam_size = 1
+min_transcript_chars = 40         # below this, treat as "no usable speech"
+
+[summarize]
+model = "qwen3.5:9b"
+host = "http://127.0.0.1:11434"
+temperature = 0.2
+num_ctx = 8192
+max_caption_chars = 4000
+max_transcript_chars = 12000
+# qwen3.5 is a reasoning model. Measured on two real captions, this machine:
+#   think = true    147.0s / 79.2s   (25,342 / 11,888 thinking chars)
+#   think = false     4.1s /  8.6s   (0)   <- titles equal or better
+# ~11 hours vs ~35 minutes across 342 videos.
+# NOT measured: quality on long transcripts. Flip to true and compare if
+# summaries look shallow once real transcripts are flowing.
+think = false
+
+[tags]
+registry_file = "_meta/tags.json"
+max_tags_per_note = 5
+# pass 2 thresholds
+split_threshold = 15              # tag size above which sub-clustering applies
+merge_similarity = 0.85
