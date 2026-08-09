@@ -312,3 +312,30 @@ def test_a_symlinked_note_cannot_claim_a_url_from_outside_the_vault(tmp_path: Pa
     index = SlugIndex.from_vault(root)
     assert index.owner_of("evil") == ""
     assert "evil" in index, "the slug is still reserved — refusing to read is not permission to clobber"
+
+
+def test_titles_that_differ_only_past_the_slug_truncation_still_get_separate_files() -> None:
+    """Slugs are cut at 80 characters, so two titles can collide after cutting.
+
+    Not hypothetical: a descriptive title capped at 90 characters can easily
+    share its first 80 with another, and "part one"/"part two" is exactly the
+    shape short-form creators use.
+    """
+    prefix = "Ten ways to use partial indexes in postgres for soft deleted rows in production"
+    a, b = prefix + " part one", prefix + " part two"
+    assert slugify(a) == slugify(b), "the premise: these collide after truncation"
+
+    index = SlugIndex()
+    first = index.claim(make_note(title=a, source_url="https://www.instagram.com/reel/AAA/"))
+    second = index.claim(make_note(title=b, source_url="https://www.instagram.com/reel/BBB/"))
+    assert first != second
+
+
+def test_a_third_video_with_the_same_title_does_not_reuse_the_second_ones_name() -> None:
+    """Each suffix is that video's own URL hash, so N videos yield N filenames."""
+    index = SlugIndex()
+    slugs = [
+        index.claim(make_note(title="Same title", source_url=f"https://www.instagram.com/reel/{c}/"))
+        for c in ("AAA", "BBB", "CCC", "DDD")
+    ]
+    assert len(set(slugs)) == 4, slugs
