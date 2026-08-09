@@ -208,13 +208,24 @@ def read_runs(path: str | os.PathLike[str]) -> list[dict]:
 
     A partial final line is the expected cost of a killed run, not corruption,
     so it is dropped rather than raised on.
+
+    Read as BYTES and decoded per line. Decoding the whole file at once looks
+    equivalent and is not: a tear can land inside a multi-byte character — any
+    non-ASCII text in a caption, handle or URL makes that reachable — and a
+    single whole-file decode then raises before any line is examined. The
+    per-line tolerance below would never run, and one torn tail would cost
+    every good record before it. Which is the opposite of the promise.
+
+    `errors="replace"` keeps a mangled line parseable-or-skippable rather than
+    fatal; a line whose bytes were damaged fails JSON parsing and is dropped,
+    exactly as a truncated one is.
     """
     p = Path(path).expanduser()
     if not p.is_file():
         return []
     out: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in p.read_bytes().split(b"\n"):
+        line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         try:

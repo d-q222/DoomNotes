@@ -492,3 +492,55 @@ def test_an_empty_or_absent_log_needs_no_newline_guard(tmp_path: Path) -> None:
     with RunJournal(path2, run_id="r1") as j:
         j.write("run_started")
     assert not path2.read_text(encoding="utf-8").startswith("\n")
+
+
+def test_a_tear_inside_a_multibyte_character_costs_one_line_not_the_file(
+    tmp_path: Path,
+) -> None:
+    """Decoding the whole file at once looks equivalent to per-line, and isn't.
+
+    A tear can land inside a multi-byte character — any non-ASCII text in a
+    caption, handle or URL makes that reachable, and records are written with
+    `ensure_ascii=False` so it really is raw UTF-8 on disk. A single whole-file
+    decode then raises before any line is examined, so the per-line tolerance
+    never runs and one torn tail costs every good record before it.
+
+    Written with a real short write rather than a truncated file, because that
+    is the kernel's actual contract under ENOSPC or a kill mid-write.
+    """
+    import json
+    import os
+
+    path = tmp_path / "runs.jsonl"
+    good = json.dumps({"run_id": "r1", "event": "video", "n": 1}, ensure_ascii=False) + "\n"
+    torn = json.dumps(
+        {"run_id": "r1", "event": "video", "n": 2, "detail": "caption 😀 continues"},
+        ensure_ascii=False,
+    ) + "\n"
+    payload = (good + torn).encode("utf-8")
+    cut = payload.rfind("😀".encode("utf-8")) + 2      # stop 2 bytes into 4
+
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.write(fd, payload[:cut])
+    os.close(fd)
+
+    with pytest.raises(UnicodeDecodeError):
+        path.read_text(encoding="utf-8")               # the premise
+
+    records = read_runs(path)
+    assert [r["n"] for r in records] == [1], "the good record before the tear survives"
+
+
+def test_a_journal_torn_mid_character_can_still_be_appended_to(tmp_path: Path) -> None:
+    """The write side never decodes, so it was already immune — assert it stays so."""
+    import os
+
+    path = tmp_path / "runs.jsonl"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.write(fd, b'{"run_id": "r1", "event": "video", "n": 1, "detail": "caption \xf0\x9f')
+    os.close(fd)
+
+    with RunJournal(path, run_id="r2") as j:
+        j.write("run_started")
+
+    assert any(r.get("run_id") == "r2" for r in read_runs(path))
