@@ -640,43 +640,13 @@ def test_a_systemic_stage_outage_does_not_consume_the_batch(
     )
 
 
-@pytest.mark.xfail(
-    reason="HANDS-ON #7.1: a source that raises takes the whole run down — "
-           "`source.fetch()` is outside the isolation boundary, which is the "
-           "seam that is supposed to stop a Playwright scraper breaking the "
-           "batch pipeline.",
-    strict=True,
-)
-def test_a_throwing_source_does_not_take_down_the_run(
-    writer: VaultWriter, store: Store, tmp_path: Path
-) -> None:
-    """Stage 2's scraper must not be able to break Stage 1.
-
-    Written against a `sources=` entry point that does not exist yet; what the
-    seam looks like is part of the decision.
-    """
-
-    class BrokenSource:
-        name = "playwright"
-
-        def fetch(self):
-            raise RuntimeError("browser context closed")
-
-    class WorkingSource:
-        name = "ig_export"
-
-        def fetch(self):
-            yield IG
-
-    result = run(
-        [],
-        sources=[BrokenSource(), WorkingSource()],
-        store=store,
-        writer=writer,
-        registry=TagRegistry(),
-        deps=deps(),
-        audio_dir=tmp_path / "audio",
-        auth_for=lambda p: {},
-        sleep_range=None,
-    )
-    assert result.notes_written == 1
+# The other half of #7.1 — "a Playwright source that throws must not take down
+# the batch pipeline" — is deliberately NOT tested here.
+#
+# Sources are collected in cli.py before `run()` is ever called, so there is no
+# seam at this layer to assert against. Any test would have to invent one
+# (a `sources=` parameter, a collect-and-isolate helper, a per-source try), and
+# an xfail(strict=True) that can only be satisfied by one specific API shape
+# stops being a specification and becomes a mechanism the decision has to obey.
+# The gap is documented in pipeline.py's HANDS-ON block and HANDS_ON.md §7.1;
+# it stays prose until the shape of the seam is chosen.

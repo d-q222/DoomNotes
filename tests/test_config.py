@@ -109,6 +109,61 @@ def test_every_key_the_code_reads_exists_in_the_shipped_config(cfg, keys) -> Non
     assert cfg.get(*keys) is not None, f"config.toml has no {'.'.join(keys)}"
 
 
+def _config_reads_in_source() -> set[tuple[str, ...]]:
+    """Every `cfg.get("a", "b", ...)` / `cfg.path("a", "b")` in the package.
+
+    Reads are all literal string keys today, so a static scan is exact rather
+    than approximate. If a dynamic read is ever introduced this will start
+    under-reporting, which fails loudly rather than silently.
+    """
+    import ast
+
+    found: set[tuple[str, ...]] = set()
+    for py in sorted((REPO_ROOT / "src" / "doomnotes").rglob("*.py")):
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"get", "path"}:
+                continue
+            keys = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+            if len(keys) >= 2:
+                found.add(tuple(keys))
+    return found
+
+
+def _config_keys_on_disk(cfg) -> set[tuple[str, str]]:
+    return {
+        (section, key)
+        for section, body in cfg.raw.items()
+        if isinstance(body, dict)
+        for key, value in body.items()
+        if not isinstance(value, dict)  # [auth.instagram] is read as a whole table
+    }
+
+
+@pytest.mark.xfail(
+    reason="BUG: five keys in config.toml are read by nothing. [download] "
+           "timeout_s / max_attempts / audio_format are the live ones — the "
+           "pipeline calls download() with three positional arguments, so its "
+           "function defaults win and editing config.toml changes nothing. "
+           "vault.meta_dir and paths.data_dir are documentation that looks "
+           "like configuration.",
+    strict=True,
+)
+def test_no_config_key_is_read_by_nothing(cfg) -> None:
+    """The drift check that matters, in the direction that catches it.
+
+    Asserting "the code's keys exist in config.toml" catches a rename. It
+    cannot catch a key that is *only* in config.toml, which is the worse
+    failure: the value looks configured, is edited with intent, and is inert.
+    """
+    on_disk = _config_keys_on_disk(cfg)
+    read = {k[:2] for k in _config_reads_in_source()}
+    dead = sorted(on_disk - read)
+    assert not dead, f"config.toml declares keys nothing reads: {dead}"
+
+
 def test_settings_builders_agree_with_the_shipped_config(cfg) -> None:
     s = summarize_settings(cfg)
     assert s.model == cfg.get("summarize", "model")
@@ -158,5 +213,13 @@ def test_pacing_window_is_ordered_and_non_instant(cfg) -> None:
 
 
 def test_queue_order_names_only_known_platforms(cfg) -> None:
-    """A typo here drops a whole platform from every run, silently."""
-    assert set(cfg.get("pacing", "queue_order")) <= {"instagram", "tiktok"}
+    """A typo here drops a whole platform from every run, silently.
+
+    Tolerant of the key disappearing: HANDS-ON #3.3 may replace a flat drain
+    order with an interleave, and this test must not be the reason that change
+    fails.
+    """
+    order = cfg.get("pacing", "queue_order", default=None)
+    if order is None:
+        pytest.skip("no queue_order — pacing no longer drains queues in a fixed order")
+    assert set(order) <= {"instagram", "tiktok"}

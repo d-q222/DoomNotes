@@ -183,10 +183,25 @@ def test_merge_chains_collapse_to_one_hop() -> None:
     assert merges["garden"] == "gardening"
 
 
-def test_nested_tags_are_left_alone_by_merging() -> None:
-    """`coding/databases` is a pass-2 output; re-merging it would undo the split."""
-    merges = plan_merges({"coding/databases": 6, "coding/database": 5})
-    assert all("/" not in k for k in merges), merges
+def test_a_child_tag_is_never_merged_into_its_parent() -> None:
+    """`coding/databases` must not collapse back into `coding`.
+
+    That would undo the split pass 2 just performed, and the two passes would
+    fight each other on every run.
+
+    Note what is deliberately NOT asserted: that nested tags are exempt from
+    merging altogether. `coding/test` and `coding/tests` DO merge, and should —
+    they are singular and plural of one tag, and collapsing them is the whole
+    job. An earlier version of this test used a namespaced pair whose stems
+    happen to differ, so it passed without exercising anything.
+    """
+    assert plan_merges({"coding": 10, "coding/databases": 6}) == {}
+    assert plan_merges({"coding/databases": 6, "coding": 10}) == {}
+
+
+def test_sibling_nested_tags_stay_distinct() -> None:
+    """`coding/databases` and `coding/frontend` are the specificity, not noise."""
+    assert plan_merges({"coding/databases": 6, "coding/frontend": 5}) == {}
 
 
 # ── split judgement ──────────────────────────────────────────────────────
