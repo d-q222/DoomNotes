@@ -21,9 +21,17 @@ from doomnotes.models import Note
 
 MAX_SLUG_LEN = 80
 
-# Cheap enough to read for every note in the vault, and anchored so a
-# `source_url:` line in a note *body* cannot be mistaken for the real one.
-FRONTMATTER_SOURCE_URL = re.compile(r"\A---\n(?:.*?\n)??source_url:[ \t]*(\S+)\s*$", re.M | re.S)
+# Frontmatter is extracted as a BLOCK first, then searched. A single regex
+# reaching for `source_url:` from the top of the file looks anchored but is not:
+# the lazy any-lines part happily walks past the closing `---`, so an unindented
+# `source_url:` line in a note's BODY — frontmatter pasted into a fenced code
+# block, say — reads as that note's real owner. Two steps, no ambiguity.
+#
+# A leading BOM and CRLF endings are tolerated because Obsidian is not the only
+# thing that touches this vault, and failing to parse reads as "unknown owner",
+# which silently costs a note its own filename.
+FRONTMATTER_BLOCK = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)^---[ \t]*$", re.S | re.M)
+SOURCE_URL_LINE = re.compile(r"^source_url:[ \t]*(.+?)[ \t]*$", re.M)
 
 
 def slugify(title: str) -> str:
@@ -37,6 +45,25 @@ def slugify(title: str) -> str:
 
 def url_hash(url: str, length: int = 6) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:length]
+
+
+def _fold(slug: str) -> str:
+    """Compare slugs the way the filesystem will.
+
+    macOS ships APFS case-insensitive by default, so `weekly-review-notes.md`
+    and `Weekly-Review-Notes.md` are ONE file. A case-sensitive index believes
+    the lowercase name is free, `os.replace` disagrees, and a hand-written note
+    is destroyed with no error and no suffix.
+
+    `slugify` only ever emits lowercase, so this can only collide with a file
+    the pipeline did not write — a hand-made `Weekly-Review-Notes.md`, or one
+    of our own notes renamed in Obsidian. Exactly the notes with no other copy.
+
+    Folding here rather than at the call sites keeps every lookup consistent;
+    the original casing is preserved in `_by_url` so an existing file is still
+    referred to by its real name.
+    """
+    return slug.casefold()
 
 
 def note_slug(note: Note, taken: "set[str] | SlugIndex | None" = None) -> str:
@@ -88,9 +115,10 @@ class SlugIndex:
     """
 
     def __init__(self, owners: dict[str, str] | None = None) -> None:
-        self._owners: dict[str, str] = dict(owners or {})
+        self._owners: dict[str, str] = {}
         self._by_url: dict[str, str] = {}
-        for slug, url in self._owners.items():
+        for slug, url in (owners or {}).items():
+            self._owners[_fold(slug)] = url
             if url:
                 self._by_url.setdefault(url, slug)
 
@@ -143,20 +171,37 @@ class SlugIndex:
             text = path.read_text(encoding="utf-8")
         except OSError:
             return ""
-        match = FRONTMATTER_SOURCE_URL.search(text)
-        return match.group(1) if match else ""
+        block = FRONTMATTER_BLOCK.search(text)
+        if not block:
+            return ""
+        line = SOURCE_URL_LINE.search(block.group(1))
+        if not line:
+            return ""
+        # Quotes are stripped because Obsidian's Properties editor re-saves
+        # frontmatter with the URL quoted. We always write it bare, so an
+        # unstripped value would stop matching the moment a note is opened in
+        # Obsidian — and the video would then be unable to recognise its own
+        # file on a reprocess.
+        return line.group(1).strip().strip("\"'").strip()
 
     def owner_of(self, slug: str) -> str | None:
         """The URL that owns `slug`, `""` if unknown, or None if it is free."""
-        return self._owners.get(slug)
+        return self._owners.get(_fold(slug))
 
     def slug_for_url(self, url: str) -> str | None:
         """The slug this URL already owns, if it owns one."""
         return self._by_url.get(url) if url else None
 
     def _free_for(self, slug: str, url: str) -> bool:
-        owner = self._owners.get(slug)
-        return owner is None or owner == url
+        owner = self._owners.get(_fold(slug))
+        if owner is None:
+            return True
+        # A falsy URL is "owner unknown", not "owner matches". Without this,
+        # two notes with no source_url would each read the other's blank owner
+        # as their own and collapse onto one file. Unreachable through today's
+        # sources — all three drop a ref with no URL before building one — but
+        # the class should not depend on its callers for that.
+        return bool(url) and owner == url
 
     def allocate(self, base: str, url: str) -> str:
         """The filename `url` should use, given a slug derived from its title.
@@ -198,13 +243,13 @@ class SlugIndex:
     def claim(self, note: Note) -> str:
         """Allocate this note's slug and record the claim."""
         slug = self.allocate(slugify(note.title), note.source_url)
-        self._owners[slug] = note.source_url
+        self._owners[_fold(slug)] = note.source_url
         if note.source_url:
             self._by_url.setdefault(note.source_url, slug)
         return slug
 
     def __contains__(self, slug: object) -> bool:
-        return slug in self._owners
+        return isinstance(slug, str) and _fold(slug) in self._owners
 
     def __len__(self) -> int:
         return len(self._owners)

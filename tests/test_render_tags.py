@@ -408,3 +408,105 @@ def test_an_orphaned_transcript_from_a_different_video_still_blocks(tmp_path: Pa
     index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
     slug = index.claim(make_note(title="Foo", source_url="https://www.instagram.com/reel/BBB/"))
     assert slug != "foo"
+
+
+# ── the filesystem has opinions the index has to share ───────────────────
+
+
+def test_a_lowercase_slug_does_not_clobber_a_mixed_case_note(tmp_path: Path) -> None:
+    """macOS ships APFS case-insensitive, so these are ONE file.
+
+    `slugify` only emits lowercase, so the collision can only be with a file
+    the pipeline did not write — a hand-made `Weekly-Review-Notes.md`, or one
+    of our own notes renamed in Obsidian. Precisely the notes with no second
+    copy anywhere.
+
+    Asserted through VaultWriter rather than against the index alone, because
+    the index believing a name is free is only harmful once something writes.
+    """
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    (root / "Weekly-Review-Notes.md").write_text(
+        '---\ntitle: "hand written"\nsource_url: https://mine.invalid/x/\n---\n\nirreplaceable\n',
+        encoding="utf-8",
+    )
+    index = SlugIndex.from_vault(root)
+    slug = index.claim(make_note(title="Weekly review notes",
+                                 source_url="https://www.instagram.com/reel/AAA/"))
+    VaultWriter(root).write_text(f"{slug}.md", "NEW CONTENT")
+
+    assert "irreplaceable" in (root / "Weekly-Review-Notes.md").read_text(encoding="utf-8")
+    assert slug != "weekly-review-notes"
+
+
+def test_ownership_lookup_is_case_insensitive_both_ways(tmp_path: Path) -> None:
+    index = SlugIndex({"Foo-Bar": "https://www.instagram.com/reel/AAA/"})
+    assert index.owner_of("foo-bar") == "https://www.instagram.com/reel/AAA/"
+    assert "FOO-BAR" in index
+
+
+# ── frontmatter is parsed as a block, not scanned for ────────────────────
+
+
+def test_a_quoted_source_url_is_still_recognised(tmp_path: Path) -> None:
+    """Obsidian's Properties editor re-saves frontmatter with the URL quoted.
+
+    We write it bare, so an unstripped read would stop matching the moment a
+    note is opened in Obsidian — and the video would then fail to recognise
+    its own file on a reprocess and write a duplicate.
+    """
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    url = "https://www.instagram.com/reel/AAA/"
+    (root / "foo.md").write_text(
+        f'---\ntitle: "Foo"\nsource_url: "{url}"\n---\n\nbody\n', encoding="utf-8"
+    )
+    index = SlugIndex.from_vault(root)
+    assert index.owner_of("foo") == url
+    assert index.claim(make_note(title="Foo reprocessed", source_url=url)) == "foo"
+
+
+def test_an_unindented_source_url_in_the_body_claims_nothing(tmp_path: Path) -> None:
+    """The dangerous half of the body case, and the reason for two-step parsing.
+
+    An indented body line never matched. An UNINDENTED one did, because a lazy
+    "any lines" prefix walks straight past the closing `---`. A note quoting
+    frontmatter inside a fenced code block would then be read as owning that
+    URL — and the real video, on the "I already own a file" path, would write
+    itself over the top of it.
+    """
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    victim = "https://www.instagram.com/reel/VICTIM/"
+    (root / "gardening-journal.md").write_text(
+        f'---\ntitle: "My journal"\n---\n\nCopied from another note:\n\nsource_url: {victim}\n',
+        encoding="utf-8",
+    )
+    index = SlugIndex.from_vault(root)
+    assert index.owner_of("gardening-journal") == ""
+    assert index.claim(make_note(title="Real video", source_url=victim)) != "gardening-journal"
+
+
+def test_a_bom_or_crlf_note_is_still_parsed(tmp_path: Path) -> None:
+    """Failing to parse reads as "unknown owner", which costs a note its name."""
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    url = "https://www.instagram.com/reel/AAA/"
+    (root / "crlf.md").write_bytes(
+        f'﻿---\r\ntitle: "t"\r\nsource_url: {url}\r\n---\r\n\r\nbody\r\n'.encode("utf-8")
+    )
+    assert SlugIndex.from_vault(root).owner_of("crlf") == url
+
+
+def test_two_notes_with_no_source_url_do_not_collapse_onto_one_file() -> None:
+    """A blank owner is "unknown", not "matches me".
+
+    Not reachable through today's sources — all three drop a ref with no URL
+    before building one — but the class should not rely on its callers for
+    that, and a browser-scraper source is the obvious way it would stop being
+    true.
+    """
+    index = SlugIndex()
+    first = index.claim(make_note(title="Video number one has this title", source_url=""))
+    second = index.claim(make_note(title="Video number one has this title", source_url=""))
+    assert first != second
