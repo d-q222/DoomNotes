@@ -117,9 +117,25 @@ class SlugIndex:
     def __init__(self, owners: dict[str, str] | None = None) -> None:
         self._owners: dict[str, str] = {}
         self._by_url: dict[str, str] = {}
+
+        # Folding makes the key space coarser, so pairs that used to be
+        # distinct now collide — and last-write-wins would let one file's
+        # ownership silently replace another's. Two names that fold together
+        # but disagree about their owner are marked CONTESTED (""), which means
+        # "occupied, attribution unknown": nobody gets the fast path to it and
+        # any claimant is suffixed away. Losing a filename is recoverable.
+        # Losing the note under it is not.
         for slug, url in (owners or {}).items():
-            self._owners[_fold(slug)] = url
-            if url:
+            key = _fold(slug)
+            if key in self._owners and self._owners[key] != url:
+                self._owners[key] = ""
+            else:
+                self._owners[key] = url
+
+        # Built in a second pass, so a URL never gets a reverse pointer to a
+        # slug it turned out not to own outright.
+        for slug, url in (owners or {}).items():
+            if url and self._owners.get(_fold(slug)) == url:
                 self._by_url.setdefault(url, slug)
 
     @classmethod
@@ -142,13 +158,25 @@ class SlugIndex:
         """
         root = Path(root)
         resolved_root = root.resolve(strict=False)
+
+        # Notes first and authoritatively. A transcript never decides who owns
+        # a name when a note of that name exists — note and transcript share a
+        # slug by construction, so the note is simply the better-informed half
+        # of the same pair. Getting this precedence wrong is how an orphaned
+        # `_transcripts/foo.md` came to overrule a hand-written `Foo.md` and
+        # hand its filename to an unrelated video.
         owners: dict[str, str] = {}
         for path in sorted(root.glob("*.md")):
-            owners[path.stem] = cls._owner_in(path, resolved_root)
+            key = _fold(path.stem)
+            owner = cls._owner_in(path, resolved_root)
+            owners[path.stem] = "" if key in {_fold(s) for s in owners} else owner
+
+        claimed = {_fold(s) for s in owners}
         for sub in subdirs:
             for path in sorted((root / sub).glob("*.md")):
-                if path.stem not in owners:
+                if _fold(path.stem) not in claimed:
                     owners[path.stem] = cls._owner_in(path, resolved_root)
+                    claimed.add(_fold(path.stem))
         return cls(owners)
 
     @staticmethod
@@ -225,8 +253,12 @@ class SlugIndex:
            Widening the hash is deterministic, so a given URL still resolves to
            the same filename on every run.
         """
+        # Re-verified rather than trusted. `_by_url` is a cache of what the
+        # vault looked like when the index was built; if that name has since
+        # become contested or someone else's, taking it on faith would write
+        # over them. Falling through just costs a suffix.
         existing = self.slug_for_url(url)
-        if existing is not None:
+        if existing is not None and self._free_for(existing, url):
             return existing
 
         if self._free_for(base, url):

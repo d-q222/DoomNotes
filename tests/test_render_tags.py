@@ -510,3 +510,72 @@ def test_two_notes_with_no_source_url_do_not_collapse_onto_one_file() -> None:
     first = index.claim(make_note(title="Video number one has this title", source_url=""))
     second = index.claim(make_note(title="Video number one has this title", source_url=""))
     assert first != second
+
+
+# ── folding made the key space coarser; collisions need a rule ───────────
+
+
+def _pair_vault(tmp_path: Path, files: dict[str, str]) -> Path:
+    root = tmp_path / "ai-notes-vault"
+    (root / "_transcripts").mkdir(parents=True, exist_ok=True)
+    for rel, body in files.items():
+        (root / rel).write_text(body, encoding="utf-8")
+    return root
+
+
+def test_a_transcript_never_overrules_a_note_of_the_same_folded_name(tmp_path: Path) -> None:
+    """The regression that case-folding itself introduced.
+
+    Folding merged two dict entries that had been distinct, last-write-wins,
+    with no conflict rule — so an orphaned `_transcripts/foo.md` silently
+    replaced the entry protecting a hand-written `Foo.md`, and handed that
+    filename to an unrelated video.
+
+    Notes are authoritative over transcripts: they share a slug by
+    construction, so the note is the better-informed half of one pair.
+    """
+    url_b = "https://www.instagram.com/reel/BBB/"
+    root = _pair_vault(tmp_path, {
+        "Foo.md": '---\ntitle: "hand written"\n---\n\nirreplaceable\n',
+        f"_transcripts/foo.md": f'---\ntitle: "t"\nsource_url: {url_b}\nkind: transcript\n---\n\nasr\n',
+    })
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    slug = index.claim(make_note(title="Foo", source_url=url_b))
+    VaultWriter(root).write_text(f"{slug}.md", "VIDEO B CONTENT")
+
+    assert "irreplaceable" in (root / "Foo.md").read_text(encoding="utf-8")
+    assert slug != "foo"
+
+
+def test_the_orphaned_transcript_reclaim_still_works(tmp_path: Path) -> None:
+    """Guard against over-correcting: with no competing note, the owner stands."""
+    url = "https://www.instagram.com/reel/AAA/"
+    root = _pair_vault(tmp_path, {
+        f"_transcripts/foo.md": f'---\ntitle: "t"\nsource_url: {url}\nkind: transcript\n---\n\nasr\n',
+    })
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    assert index.claim(make_note(title="Foo", source_url=url)) == "foo"
+
+
+def test_an_ordinary_note_and_transcript_pair_is_not_contested(tmp_path: Path) -> None:
+    """The common case: every written note has a transcript with its own slug."""
+    url = "https://www.instagram.com/reel/AAA/"
+    root = _pair_vault(tmp_path, {
+        "foo.md": f'---\ntitle: "Foo"\nsource_url: {url}\n---\n\nbody\n',
+        f"_transcripts/foo.md": f'---\ntitle: "t"\nsource_url: {url}\nkind: transcript\n---\n\nasr\n',
+    })
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    assert index.claim(make_note(title="Foo", source_url=url)) == "foo"
+
+
+def test_two_names_folding_together_with_different_owners_are_contested() -> None:
+    """"Occupied, attribution unknown" — nobody gets the fast path to it.
+
+    Losing a filename is recoverable. Losing the note under it is not.
+    """
+    a, b = "https://www.instagram.com/reel/AAA/", "https://www.instagram.com/reel/BBB/"
+    index = SlugIndex({"Foo": a, "foo": b})
+    assert index.owner_of("foo") == ""
+    assert index.slug_for_url(a) is None
+    assert index.slug_for_url(b) is None
+    assert index.claim(make_note(title="Foo", source_url=a)) != "foo"
