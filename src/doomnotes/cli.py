@@ -16,6 +16,7 @@ from pathlib import Path
 
 from doomnotes import config as config_mod
 from doomnotes.consolidate import consolidate
+from doomnotes.download import download, fetch_url
 from doomnotes.pipeline import Deps, run as run_batch
 from doomnotes.sources import ig_export, manual, tiktok_export
 from doomnotes.store import Store
@@ -23,6 +24,8 @@ from doomnotes.summarize import settings_from_config as summarize_settings, summ
 from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import settings_from_config as transcribe_settings, transcribe
 from doomnotes.vault import VaultGuardError, VaultWriter
+
+log = logging.getLogger(__name__)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -101,7 +104,16 @@ def cmd_run(args, cfg) -> int:
 
     t_settings = transcribe_settings(cfg)
     s_settings = summarize_settings(cfg)
+    # The downloader is wired explicitly rather than left as Deps' default,
+    # because the default is `download` called with three positional arguments —
+    # which means its own function defaults win and the [download] section of
+    # config.toml is inert. Editing audio_format there used to change nothing.
+    timeout_s = int(cfg.get("download", "timeout_s", default=180))
+    audio_format = str(cfg.get("download", "audio_format", default="m4a"))
     deps = Deps(
+        downloader=lambda ref, audio_dir, auth: download(
+            ref, audio_dir, auth, timeout_s=timeout_s, audio_format=audio_format
+        ),
         transcriber=lambda p: transcribe(p, t_settings),
         summarizer=lambda ref, tr, media, reg: summarize(
             ref, tr, media, reg, s_settings
@@ -116,22 +128,42 @@ def cmd_run(args, cfg) -> int:
         cfg.get("pacing", "batch_cap", default=35)
     )
 
-    with Store(cfg.path("paths", "state_db")) as store:
-        result = run_batch(
-            refs,
-            store=store,
-            writer=writer,
-            registry=registry,
-            deps=deps,
-            audio_dir=cfg.path("paths", "audio_dir"),
-            auth_for=_auth_for(cfg),
-            transcripts_dir=cfg.get("vault", "transcripts_dir", default="_transcripts"),
-            limit=limit,
-            sleep_range=None if args.no_sleep else sleep_range,
-            keep_audio=args.keep_audio,
-        )
+    try:
+        with Store(cfg.path("paths", "state_db")) as store:
+            result = run_batch(
+                refs,
+                store=store,
+                writer=writer,
+                registry=registry,
+                deps=deps,
+                audio_dir=cfg.path("paths", "audio_dir"),
+                auth_for=_auth_for(cfg),
+                transcripts_dir=cfg.get("vault", "transcripts_dir", default="_transcripts"),
+                limit=limit,
+                sleep_range=None if args.no_sleep else sleep_range,
+                keep_audio=args.keep_audio,
+            )
+    finally:
+        # Persisted even when the run does not finish. A paced batch spends
+        # roughly half an hour asleep between downloads, so Ctrl-C partway
+        # through is an ordinary way for it to end — and the notes it already
+        # wrote are on disk either way. Without this, the vocabulary those
+        # notes contributed is dropped, and the next run's pass-1 prompt is
+        # handed a registry that disagrees with the vault, so it mints
+        # duplicates of tags that already exist.
+        #
+        # Not data loss: `doomnotes consolidate` rebuilds the registry from
+        # note frontmatter. It is a quality loss until someone does.
+        #
+        # Guarded, because an exception raised inside a `finally` REPLACES the
+        # one being propagated. A disk-full error here would otherwise hide the
+        # VaultGuardError or checkpoint that actually ended the run — swapping
+        # the diagnosis for a symptom at the exact moment it is needed.
+        try:
+            writer.write_text(registry_rel, registry.to_json())
+        except Exception:  # noqa: BLE001 - must never displace the real error
+            log.exception("could not persist the tag registry to %s", registry_rel)
 
-    writer.write_text(registry_rel, registry.to_json())
     print()
     print(result.summary())
     if result.stopped:
@@ -165,15 +197,34 @@ def cmd_check_auth(args, cfg) -> int:
     print("Run these by hand, one at a time, and read the errors:\n")
     # Deliberately placeholders, not real URLs. A real shortcode here would be
     # a real saved post committed to a repository.
-    for platform, example in (
-        ("instagram", "<paste a /reel/ URL — `doomnotes parse` lists them>"),
-        ("tiktok", "<paste a tiktokv.com/share/video/ URL from the same output>"),
+    for platform, example, note in (
+        (
+            "instagram",
+            "https://www.instagram.com/reel/<SHORTCODE>/",
+            "<SHORTCODE> — copy one from `doomnotes parse`",
+        ),
+        (
+            "tiktok",
+            "https://www.tiktok.com/@_/video/<ID>",
+            "<ID> — the digits from a tiktokv.com/share/video/<ID>/ link. "
+            "Not a typo, see below",
+        ),
     ):
         auth = cfg.get("auth", platform, default={}) or {}
         browser = auth.get("browser", "chrome")
-        print(f"  # {platform}")
+        print(f"  # {platform}    {note}")
         print(f"  yt-dlp --cookies-from-browser {browser} -f 'ba/b' -x \\")
         print(f"    '{example}' -o 'data/authtest-{platform}.%(ext)s'\n")
+
+    print("Why the TikTok URL above is not the one in your export. yt-dlp has")
+    print("no extractor for the www.tiktokv.com host the export uses — it falls")
+    print("through to the generic extractor and relies on a redirect. A real")
+    print("run therefore requests `https://www.tiktok.com/@_/video/<ID>`, which")
+    print("is yt-dlp's own form for an unknown uploader. Probing that form is")
+    print("what makes this test what a batch will actually do.")
+    print()
+    print("If it fails and the share URL works, revert `fetch_url` in")
+    print("download.py to return ref.url — nothing else depends on it.\n")
     print("Success = an audio file on disk. On failure, fall back to an")
     print("exported cookies.txt at")
     print("  ~/.config/doomnotes/cookies.txt   (chmod 600, outside this repo)")

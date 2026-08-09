@@ -223,6 +223,53 @@ def test_run_with_a_zero_limit_touches_no_platform(env, capsys) -> None:
     assert "Run summary" in capsys.readouterr().out
 
 
+def test_the_tag_registry_survives_an_interrupted_run(env, monkeypatch) -> None:
+    """A paced batch sleeps ~30 minutes in total, so Ctrl-C partway is normal.
+
+    The notes an interrupted run already wrote are on disk regardless. If their
+    vocabulary is not persisted with them, the next run's pass-1 prompt gets a
+    registry that disagrees with the vault and mints duplicates of tags that
+    already exist.
+    """
+    from doomnotes import cli as cli_mod
+
+    def die_after_contributing_tags(refs, **kwargs):
+        kwargs["registry"].observe(["coding", "databases"])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "run_batch", die_after_contributing_tags)
+
+    urls = env["tmp"] / "urls.txt"
+    urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
+    with pytest.raises(KeyboardInterrupt):
+        run_cli(env, "run", "--urls", str(urls), "--no-sleep")
+
+    registry = json.loads((env["vault"] / "_meta" / "tags.json").read_text(encoding="utf-8"))
+    assert set(registry["tags"]) == {"coding", "databases"}
+
+
+def test_check_auth_shows_the_tiktok_url_form_a_real_run_will_request(env, capsys) -> None:
+    """The probe has to test what the pipeline does, or it proves nothing.
+
+    yt-dlp has no extractor for the tiktokv.com/share/ host in the export, so
+    the pipeline rewrites TikTok refs to yt-dlp's own canonical form before
+    requesting them. If check-auth still showed the export's URL, a passing
+    probe would say nothing about whether a batch will work.
+    """
+    run_cli(env, "check-auth")
+    out = capsys.readouterr().out
+    assert "https://www.tiktok.com/@_/video/<ID>" in out
+    assert "fetch_url" in out, "and how to revert it if the probe says otherwise"
+
+
+def test_check_auth_gives_a_pasteable_url_template_per_platform(env, capsys) -> None:
+    """The probe is copy-pasted at 8am. Ambiguity there costs real time."""
+    run_cli(env, "check-auth")
+    out = capsys.readouterr().out
+    assert "https://www.instagram.com/reel/<SHORTCODE>/" in out
+    assert "https://www.tiktok.com/@_/video/<ID>" in out
+
+
 def test_run_reports_dropped_manual_urls_rather_than_failing_them(env, capsys) -> None:
     """A malformed line is a parse problem, not a download problem."""
     urls = env["tmp"] / "urls.txt"
@@ -231,3 +278,28 @@ def test_run_reports_dropped_manual_urls_rather_than_failing_them(env, capsys) -
     )
     assert run_cli(env, "run", "--urls", str(urls), "--limit", "0", "--no-sleep") == 0
     assert "dropped" in capsys.readouterr().out
+
+
+def test_a_failed_registry_write_does_not_hide_why_the_run_ended(env, monkeypatch, caplog) -> None:
+    """An exception raised inside a `finally` REPLACES the one propagating.
+
+    A disk-full error while persisting the registry would otherwise swap the
+    checkpoint or guard error that actually ended the run for a symptom — at
+    exactly the moment the diagnosis is needed.
+    """
+    from doomnotes import cli as cli_mod
+    from doomnotes.vault import VaultWriter
+
+    def die(refs, **kwargs):
+        raise RuntimeError("the real reason the run ended")
+
+    def cannot_write(self, relative, text):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(cli_mod, "run_batch", die)
+    monkeypatch.setattr(VaultWriter, "write_text", cannot_write)
+
+    urls = env["tmp"] / "urls.txt"
+    urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="the real reason the run ended"):
+        run_cli(env, "run", "--urls", str(urls), "--no-sleep")

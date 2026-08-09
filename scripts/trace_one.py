@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from doomnotes.render import note_slug, render_note, render_transcript  # noqa: E402
+from doomnotes.render import SlugIndex, note_slug, render_note, render_transcript  # noqa: E402
 from doomnotes.sources.ig_export import DEFAULT_EXPORT, parse  # noqa: E402
 from doomnotes.store import Store  # noqa: E402
 from doomnotes.summarize import settings_from_config, summarize  # noqa: E402
@@ -146,7 +146,7 @@ def main() -> int:
     vault = workdir / "vault"
     (vault / "_transcripts").mkdir(parents=True)
     writer = VaultWriter(vault)
-    slug = note_slug(note, set())
+    slug = note_slug(note, SlugIndex())
     md = render_note(note, slug)
     tmd = render_transcript(note, SAMPLE_TRANSCRIPT)
     note_path, tpath = writer.write_pair(f"{slug}.md", md, f"_transcripts/{slug}.md", tmd)

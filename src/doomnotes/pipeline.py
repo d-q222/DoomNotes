@@ -45,7 +45,7 @@ from typing import Callable, Iterable, Sequence
 
 from doomnotes.download import DownloadResult, Outcome, download, sleep_seconds
 from doomnotes.models import Media, Note, VideoRef
-from doomnotes.render import note_slug, render_note, render_transcript
+from doomnotes.render import SlugIndex, render_note, render_transcript
 from doomnotes.store import Store
 from doomnotes.summarize import SummarizeError, summarize
 from doomnotes.tags import TagRegistry
@@ -100,7 +100,7 @@ def process_one(
     audio_dir: Path,
     auth: dict,
     transcripts_dir: str,
-    taken_slugs: set[str],
+    taken_slugs: SlugIndex,
     keep_audio: bool = False,
 ) -> tuple[str, str | None, Path | None]:
     """Run one ref through every stage.
@@ -138,8 +138,7 @@ def process_one(
         return "failed", f"summarize:{exc}", None
 
     # -- write ------------------------------------------------------------
-    slug = note_slug(note, taken_slugs)
-    taken_slugs.add(slug)
+    slug = taken_slugs.claim(note)
 
     transcript_rel = f"{transcripts_dir}/{slug}.md" if transcript else None
     note_md = render_note(note, slug if transcript else None, transcripts_dir)
@@ -173,7 +172,9 @@ def run(
     """Process a batch. Never raises for an individual video."""
     d = deps or Deps()
     out = RunResult()
-    taken: set[str] = set()
+    # Seeded from the vault, not empty: runs are separate processes days apart,
+    # so an in-memory set cannot see notes an earlier run wrote. See SlugIndex.
+    taken = SlugIndex.from_vault(writer.root, subdirs=(transcripts_dir,))
 
     store.register(refs)
     batch = store.queue(list(refs), limit)

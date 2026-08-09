@@ -170,6 +170,26 @@ def test_unrelated_words_sharing_a_prefix_stay_separate(pair: tuple[str, str]) -
     assert merged == {}, f"{pair} should not merge, got {merged}"
 
 
+@pytest.mark.xfail(
+    reason="TIER-1 #3, undecided: the similarity rule merges `compose` into "
+           "`compost` (0.857 against a 0.85 threshold) and `composing` into "
+           "`composting` (0.947). Both live in THIS vault — `compose` from "
+           "docker-compose, `compost` from gardening — so the false merge is "
+           "specific rather than theoretical.\n"
+           "Not a regression: identical before and after the equivalence-group "
+           "rewrite, and identical on main. Left undecided because the fix is "
+           "a judgement about tag semantics, not a bug: raising the threshold "
+           "does not help (`composing`/`composting` scores 0.947), so the real "
+           "question is whether edit-distance similarity earns its place next "
+           "to the derivational rule at all, or should be dropped so only "
+           "morphology merges.",
+    strict=True,
+)
+def test_similar_spellings_from_different_domains_stay_separate() -> None:
+    assert plan_merges({"compose": 6, "compost": 5}) == {}
+    assert plan_merges({"composing": 6, "composting": 5}) == {}
+
+
 def test_merge_target_is_the_most_used_variant() -> None:
     """Canonical = most used, so consolidation follows your actual vocabulary."""
     merges = plan_merges({"plant": 2, "plants": 11})
@@ -257,48 +277,23 @@ def test_registry_counts_match_the_notes_after_consolidation(
     assert registry.counts() == from_notes
 
 
-# ── known bug, fixed in the next PR ──────────────────────────────────────
+# ── the registry survives the pass ───────────────────────────────────────
 #
-# NOT a HANDS-ON gap. These describe a defect in SUPERVISE code, and the marker
-# comes off when it is fixed. They are kept separate from the #N.N xfails above
-# so the two kinds are never confused.
-
-
-MERGE_ORDER_BUG = pytest.mark.xfail(
-    reason="BUG: plan_merges runs its two rules in sequence over the SAME "
-           "namespace, so whichever variant stage 1 happens to pick as "
-           "canonical is what stage 2 then has to match against. When the "
-           "plural outnumbers the singular, `garden` is absorbed into "
-           "`gardens` first, and `gardens`/`gardening` is not a derivation — "
-           "so `gardening` is stranded. Tier-1 #3's own example.\n"
-           "Worse, the stranding is PERMANENT. Once pass 2 has rewritten every "
-           "note from `garden` to `gardens`, the bridging tag no longer exists "
-           "anywhere, so a later run sees only {gardens, gardening} and merges "
-           "nothing. Re-running consolidation cannot repair it — which matters "
-           "because being safely re-runnable is the property pass 2 is sold on.",
-    strict=True,
-)
+# Counts are rebuilt from the notes every run, because the notes are the truth.
+# Descriptions cannot be rebuilt that way — frontmatter does not carry them —
+# so they have to be carried across explicitly, which is what these pin.
 
 
 @pytest.mark.parametrize(
     "counts,expected_canonical",
     [
-        # The singular is more common: `garden` survives stage 1 and the
-        # derivational rule then reaches `gardening`. This one works today,
-        # which is exactly why the marker is per-case and not table-wide.
+        # Three morphologically identical vocabularies. Before the two rules
+        # were changed to build equivalence groups, only the first consolidated
+        # — the other two stranded their third tag, because whichever variant
+        # the tally favoured was the only one the second rule could see.
         pytest.param({"garden": 5, "gardens": 2, "gardening": 9}, "gardening", id="singular-wins"),
-        # The plural is more common: identical vocabulary, different counts,
-        # and the third tag never merges. Nothing about the words changed.
-        pytest.param(
-            {"garden": 1, "gardens": 2, "gardening": 9}, "gardening",
-            id="plural-wins", marks=MERGE_ORDER_BUG,
-        ),
-        # Same shape without plurals: `build` is consumed by `builder` before
-        # `building` is ever compared against it.
-        pytest.param(
-            {"build": 3, "builder": 5, "building": 4}, "builder",
-            id="suffix-race", marks=MERGE_ORDER_BUG,
-        ),
+        pytest.param({"garden": 1, "gardens": 2, "gardening": 9}, "gardening", id="plural-wins"),
+        pytest.param({"build": 3, "builder": 5, "building": 4}, "builder", id="suffix-race"),
     ],
 )
 def test_merging_does_not_depend_on_which_variant_is_most_used(
@@ -317,19 +312,6 @@ def test_merging_does_not_depend_on_which_variant_is_most_used(
     )
 
 
-@pytest.mark.xfail(
-    reason="BUG: consolidate() never loads the existing registry — it builds a "
-           "new one from note frontmatter — so every description in "
-           "_meta/tags.json is wiped on every run, merged tags and untouched "
-           "tags alike.\n"
-           "Scope today, stated honestly: nothing populates `description` "
-           "automatically, so what this destroys is hand-written annotations "
-           "in tags.json and nothing else. It becomes live the moment #5.2 "
-           "injects descriptions to disambiguate a tag like `growth` (plants "
-           "or startups?) — at which point the field it depends on is being "
-           "silently emptied by a pass that runs after every batch.",
-    strict=True,
-)
 def test_consolidation_preserves_tag_descriptions(writer: VaultWriter, vault: Path) -> None:
     write_notes(vault, [["cooking"], ["cooking"]])
     (vault / "_meta" / "tags.json").write_text(
@@ -343,11 +325,6 @@ def test_consolidation_preserves_tag_descriptions(writer: VaultWriter, vault: Pa
     assert registry.tags["cooking"]["description"] == "recipes and technique"
 
 
-@pytest.mark.xfail(
-    reason="BUG: same root cause — a merged-away tag's description is lost "
-           "instead of being inherited by the canonical tag that absorbed it.",
-    strict=True,
-)
 def test_a_merge_inherits_the_description_of_what_it_absorbed(
     writer: VaultWriter, vault: Path
 ) -> None:

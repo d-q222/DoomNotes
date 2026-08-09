@@ -15,10 +15,23 @@ import hashlib
 import re
 import unicodedata
 from datetime import datetime
+from pathlib import Path
 
 from doomnotes.models import Note
 
 MAX_SLUG_LEN = 80
+
+# Frontmatter is extracted as a BLOCK first, then searched. A single regex
+# reaching for `source_url:` from the top of the file looks anchored but is not:
+# the lazy any-lines part happily walks past the closing `---`, so an unindented
+# `source_url:` line in a note's BODY — frontmatter pasted into a fenced code
+# block, say — reads as that note's real owner. Two steps, no ambiguity.
+#
+# A leading BOM and CRLF endings are tolerated because Obsidian is not the only
+# thing that touches this vault, and failing to parse reads as "unknown owner",
+# which silently costs a note its own filename.
+FRONTMATTER_BLOCK = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)^---[ \t]*$", re.S | re.M)
+SOURCE_URL_LINE = re.compile(r"^source_url:[ \t]*(.+?)[ \t]*$", re.M)
 
 
 def slugify(title: str) -> str:
@@ -34,16 +47,248 @@ def url_hash(url: str, length: int = 6) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:length]
 
 
-def note_slug(note: Note, taken: set[str] | None = None) -> str:
+def _fold(slug: str) -> str:
+    """Compare slugs the way the filesystem will.
+
+    macOS ships APFS case-insensitive by default, so `weekly-review-notes.md`
+    and `Weekly-Review-Notes.md` are ONE file. A case-sensitive index believes
+    the lowercase name is free, `os.replace` disagrees, and a hand-written note
+    is destroyed with no error and no suffix.
+
+    `slugify` only ever emits lowercase, so this can only collide with a file
+    the pipeline did not write — a hand-made `Weekly-Review-Notes.md`, or one
+    of our own notes renamed in Obsidian. Exactly the notes with no other copy.
+
+    Folding here rather than at the call sites keeps every lookup consistent;
+    the original casing is preserved in `_by_url` so an existing file is still
+    referred to by its real name.
+    """
+    return slug.casefold()
+
+
+def note_slug(note: Note, taken: "SlugIndex | None" = None) -> str:
     """Slug for this note, with a short URL hash appended on collision.
 
     The hash is derived from the URL rather than a counter so that re-running a
     note lands on the same filename instead of accumulating `-2`, `-3` copies.
+
+    There is deliberately only ONE allocation path. This used to also accept a
+    bare set of slugs, treating any match as a collision — which cannot tell
+    "another video wants this name" from "this video already owns it", and
+    returned a hash-suffixed name without checking whether that was free
+    either. Nothing on the write path called it, so it was a second, weaker
+    implementation of the rule kept alive only by its own tests.
     """
-    base = slugify(note.title)
-    if taken is None or base not in taken:
-        return base
-    return f"{base}-{url_hash(note.source_url)}"
+    if taken is None:
+        return slugify(note.title)
+    return taken.allocate(slugify(note.title), note.source_url)
+
+
+class SlugIndex:
+    """Which slugs are taken, and by which video.
+
+    Rebuilt from the vault at the start of each run, because runs are separate
+    processes days apart — an in-memory set only ever knew about the notes the
+    *current* run had written, so two videos that generated the same title in
+    two different runs quietly resolved to one file and the earlier note was
+    replaced. The store still recorded the lost video as done, so nothing
+    regenerated it and nothing reported it.
+
+    Keyed on `source_url` rather than on the slug alone, because the two cases
+    look identical from the filename and must not be treated alike:
+
+        another video wants this name  -> append the URL hash, keep both notes
+        this video already owns it     -> reuse the name, overwrite in place
+
+    Collapsing them either loses a note (always reuse) or accumulates a
+    duplicate on every re-run (always suffix).
+
+    It is indexed both ways. slug -> owner answers "may I have this name"; the
+    reverse, owner -> slug, answers "do I already have one", which matters
+    because a video's title is model output and is not stable across runs. The
+    same URL summarised twice can produce two different titles, and without the
+    reverse lookup the second run has no way to discover it already owns a file
+    — so the vault ends up with two notes carrying the same `source_url` and
+    nothing to reconcile them.
+    """
+
+    def __init__(self, owners: dict[str, str] | None = None) -> None:
+        self._owners: dict[str, str] = {}
+        self._by_url: dict[str, str] = {}
+
+        # Folding makes the key space coarser, so pairs that used to be
+        # distinct now collide — and last-write-wins would let one file's
+        # ownership silently replace another's. Two names that fold together
+        # but disagree about their owner are marked CONTESTED (""), which means
+        # "occupied, attribution unknown": nobody gets the fast path to it and
+        # any claimant is suffixed away. Losing a filename is recoverable.
+        # Losing the note under it is not.
+        for slug, url in (owners or {}).items():
+            key = _fold(slug)
+            if key in self._owners and self._owners[key] != url:
+                self._owners[key] = ""
+            else:
+                self._owners[key] = url
+
+        # Built in a second pass, so a URL never gets a reverse pointer to a
+        # slug it turned out not to own outright.
+        for slug, url in (owners or {}).items():
+            if url and self._owners.get(_fold(slug)) == url:
+                self._by_url.setdefault(url, slug)
+
+    @classmethod
+    def from_vault(cls, root: str | Path, *, subdirs: tuple[str, ...] = ()) -> "SlugIndex":
+        """Read every note already in the vault and record who owns its slug.
+
+        Notes are scanned at the top level; `_meta/` holds no notes. A note
+        without a readable `source_url` still reserves its slug — it is
+        someone's note, and the conservative reading is that overwriting it
+        would lose something.
+
+        Transcripts are scanned too, and their frontmatter is read rather than
+        just their names. `write_pair` deliberately lands the transcript first
+        so a wikilink can never dangle, which means a run killed in between
+        leaves a transcript with no note. Recording only the name would make
+        that orphan an *unknown* owner, so the retry of the very video that owns
+        the slug would read it as a collision and get suffixed away from its own
+        filename — leaving the orphan stranded permanently. `render_transcript`
+        writes a `source_url`, so the owner is right there to be read.
+        """
+        root = Path(root)
+        resolved_root = root.resolve(strict=False)
+
+        # Notes first and authoritatively. A transcript never decides who owns
+        # a name when a note of that name exists — note and transcript share a
+        # slug by construction, so the note is simply the better-informed half
+        # of the same pair. Getting this precedence wrong is how an orphaned
+        # `_transcripts/foo.md` came to overrule a hand-written `Foo.md` and
+        # hand its filename to an unrelated video.
+        #
+        # Root-level fold collisions are NOT resolved here. `__init__` already
+        # compares owners and only contests a genuine disagreement; doing it
+        # here as well marked two *agreeing* files contested, which cost a video
+        # its own filename for no reason. Two top-level files whose stems fold
+        # together cannot coexist on this machine's filesystem anyway — but on a
+        # case-sensitive volume they can, and then one rule is right and two are
+        # not.
+        owners: dict[str, str] = {}
+        for path in sorted(root.glob("*.md")):
+            owners[path.stem] = cls._owner_in(path, resolved_root)
+
+        claimed = {_fold(s) for s in owners}
+        for sub in subdirs:
+            for path in sorted((root / sub).glob("*.md")):
+                if _fold(path.stem) not in claimed:
+                    owners[path.stem] = cls._owner_in(path, resolved_root)
+                    claimed.add(_fold(path.stem))
+        return cls(owners)
+
+    @staticmethod
+    def _owner_in(path: Path, resolved_root: Path) -> str:
+        """The source_url in `path`, or "" if it cannot be trusted.
+
+        Resolve-then-verify, the same order vault.py's write guard uses and for
+        the same reason: a symlink inside the vault resolves out of it. Reading
+        through one is far less serious than writing through one — the result
+        only ever feeds an ownership comparison and never reaches output or a
+        filesystem path — but a symlinked `evil.md` could otherwise claim a URL
+        it does not own, and the conservative answer costs nothing.
+
+        Returning "" is the safe direction: the slug stays reserved, so the
+        worst case is a note getting a hash suffix it did not strictly need.
+        """
+        try:
+            if not path.resolve(strict=False).is_relative_to(resolved_root):
+                return ""
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        block = FRONTMATTER_BLOCK.search(text)
+        if not block:
+            return ""
+        line = SOURCE_URL_LINE.search(block.group(1))
+        if not line:
+            return ""
+        # Quotes are stripped because Obsidian's Properties editor re-saves
+        # frontmatter with the URL quoted. We always write it bare, so an
+        # unstripped value would stop matching the moment a note is opened in
+        # Obsidian — and the video would then be unable to recognise its own
+        # file on a reprocess.
+        return line.group(1).strip().strip("\"'").strip()
+
+    def owner_of(self, slug: str) -> str | None:
+        """The URL that owns `slug`, `""` if unknown, or None if it is free."""
+        return self._owners.get(_fold(slug))
+
+    def slug_for_url(self, url: str) -> str | None:
+        """The slug this URL already owns, if it owns one."""
+        return self._by_url.get(url) if url else None
+
+    def _free_for(self, slug: str, url: str) -> bool:
+        owner = self._owners.get(_fold(slug))
+        if owner is None:
+            return True
+        # A falsy URL is "owner unknown", not "owner matches". Without this,
+        # two notes with no source_url would each read the other's blank owner
+        # as their own and collapse onto one file. Unreachable through today's
+        # sources — all three drop a ref with no URL before building one — but
+        # the class should not depend on its callers for that.
+        return bool(url) and owner == url
+
+    def allocate(self, base: str, url: str) -> str:
+        """The filename `url` should use, given a slug derived from its title.
+
+        Three cases, in order:
+
+        1. **This URL already owns a file.** Reuse that name, even though the
+           title may have drifted since. Writing a second file would leave two
+           notes carrying one `source_url` and nothing in the system able to
+           reconcile them — `consolidate` merges tags, never notes. Reusing is
+           also what the URL-derived hash was for: re-running a video lands on
+           its existing file rather than accumulating copies.
+
+        2. **The base name is free, or already ours.** Take it.
+
+        3. **Another video holds it.** Append this URL's hash — and then check
+           *that* name too, rather than trusting it. A six-hex-character suffix
+           is not guaranteed unique against a note whose own title happens to
+           slugify to `<base>-<6 hex>`, and an unchecked claim there overwrites
+           a real note, which is the exact failure this class exists to stop.
+           Widening the hash is deterministic, so a given URL still resolves to
+           the same filename on every run.
+        """
+        # Re-verified rather than trusted. `_by_url` is a cache of what the
+        # vault looked like when the index was built; if that name has since
+        # become contested or someone else's, taking it on faith would write
+        # over them. Falling through just costs a suffix.
+        existing = self.slug_for_url(url)
+        if existing is not None and self._free_for(existing, url):
+            return existing
+
+        if self._free_for(base, url):
+            return base
+
+        for length in (6, 8, 12, 16, 32, 64):
+            candidate = f"{base}-{url_hash(url, length)}"
+            if self._free_for(candidate, url):
+                return candidate
+        # Unreachable short of a full SHA-256 collision, but silently returning
+        # a taken name would mean overwriting someone's note.
+        raise RuntimeError(f"could not allocate a free filename for {base!r}")
+
+    def claim(self, note: Note) -> str:
+        """Allocate this note's slug and record the claim."""
+        slug = self.allocate(slugify(note.title), note.source_url)
+        self._owners[_fold(slug)] = note.source_url
+        if note.source_url:
+            self._by_url.setdefault(note.source_url, slug)
+        return slug
+
+    def __contains__(self, slug: object) -> bool:
+        return isinstance(slug, str) and _fold(slug) in self._owners
+
+    def __len__(self) -> int:
+        return len(self._owners)
 
 
 def _yaml_scalar(value: str) -> str:

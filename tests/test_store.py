@@ -95,7 +95,7 @@ def test_stats_group_by_platform_and_state(store: Store) -> None:
 
 
 @pytest.mark.xfail(
-    reason="Naive store treats every failure as terminal, so a "
+    reason="HANDS-ON #2.1: the naive store treats every failure as terminal, so a "
            "transient error permanently drops the video from all future queues",
     strict=True,
 )
@@ -106,7 +106,7 @@ def test_retryable_failure_returns_to_the_queue(store: Store) -> None:
 
 
 @pytest.mark.xfail(
-    reason="`attempts` is written but never read. The naive store "
+    reason="HANDS-ON #2.1: `attempts` is written but never read. The naive store "
            "'bounds' retries only because it never retries at all — so the "
            "first half of this test is what fails.",
     strict=True,
