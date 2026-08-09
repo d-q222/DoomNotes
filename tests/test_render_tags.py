@@ -286,3 +286,29 @@ def test_transcripts_reserve_their_slug_too(tmp_path: Path) -> None:
     (root / "_transcripts" / "orphaned.md").write_text("raw asr\n", encoding="utf-8")
     index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
     assert "orphaned" in index
+
+
+def test_a_symlinked_note_cannot_claim_a_url_from_outside_the_vault(tmp_path: Path) -> None:
+    """Resolve-then-verify on read, same order the write guard uses.
+
+    Reading through a symlink is far less serious than writing through one —
+    the result only feeds an ownership comparison and never reaches output or
+    a filesystem path. But an `evil.md` symlinked at some file outside the
+    vault could otherwise claim a source_url it does not own, and the
+    conservative answer costs nothing.
+
+    "" rather than None is the safe direction: the slug stays reserved, so the
+    worst outcome is a hash suffix that was not strictly needed.
+    """
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text(
+        '---\ntitle: "t"\nsource_url: https://elsewhere.invalid/x/\n---\n\nbody\n',
+        encoding="utf-8",
+    )
+    (root / "evil.md").symlink_to(outside)
+
+    index = SlugIndex.from_vault(root)
+    assert index.owner_of("evil") == ""
+    assert "evil" in index, "the slug is still reserved — refusing to read is not permission to clobber"

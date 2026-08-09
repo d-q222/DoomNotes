@@ -25,6 +25,8 @@ from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import settings_from_config as transcribe_settings, transcribe
 from doomnotes.vault import VaultGuardError, VaultWriter
 
+log = logging.getLogger(__name__)
+
 
 def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(
@@ -152,7 +154,15 @@ def cmd_run(args, cfg) -> int:
         #
         # Not data loss: `doomnotes consolidate` rebuilds the registry from
         # note frontmatter. It is a quality loss until someone does.
-        writer.write_text(registry_rel, registry.to_json())
+        #
+        # Guarded, because an exception raised inside a `finally` REPLACES the
+        # one being propagated. A disk-full error here would otherwise hide the
+        # VaultGuardError or checkpoint that actually ended the run — swapping
+        # the diagnosis for a symptom at the exact moment it is needed.
+        try:
+            writer.write_text(registry_rel, registry.to_json())
+        except Exception:  # noqa: BLE001 - must never displace the real error
+            log.exception("could not persist the tag registry to %s", registry_rel)
 
     print()
     print(result.summary())

@@ -270,3 +270,28 @@ def test_run_reports_dropped_manual_urls_rather_than_failing_them(env, capsys) -
     )
     assert run_cli(env, "run", "--urls", str(urls), "--limit", "0", "--no-sleep") == 0
     assert "dropped" in capsys.readouterr().out
+
+
+def test_a_failed_registry_write_does_not_hide_why_the_run_ended(env, monkeypatch, caplog) -> None:
+    """An exception raised inside a `finally` REPLACES the one propagating.
+
+    A disk-full error while persisting the registry would otherwise swap the
+    checkpoint or guard error that actually ended the run for a symptom — at
+    exactly the moment the diagnosis is needed.
+    """
+    from doomnotes import cli as cli_mod
+    from doomnotes.vault import VaultWriter
+
+    def die(refs, **kwargs):
+        raise RuntimeError("the real reason the run ended")
+
+    def cannot_write(self, relative, text):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(cli_mod, "run_batch", die)
+    monkeypatch.setattr(VaultWriter, "write_text", cannot_write)
+
+    urls = env["tmp"] / "urls.txt"
+    urls.write_text("https://www.instagram.com/reel/AAAAAAAAAAA/\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="the real reason the run ended"):
+        run_cli(env, "run", "--urls", str(urls), "--no-sleep")

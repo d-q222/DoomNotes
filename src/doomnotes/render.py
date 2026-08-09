@@ -94,19 +94,37 @@ class SlugIndex:
         conservative reading is that overwriting it would lose something.
         """
         root = Path(root)
+        resolved_root = root.resolve(strict=False)
         owners: dict[str, str] = {}
         for path in sorted(root.glob("*.md")):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                owners[path.stem] = ""
-                continue
-            match = FRONTMATTER_SOURCE_URL.search(text)
-            owners[path.stem] = match.group(1) if match else ""
+            owners[path.stem] = cls._owner_in(path, resolved_root)
         for sub in subdirs:
             for path in sorted((root / sub).glob("*.md")):
                 owners.setdefault(path.stem, "")
         return cls(owners)
+
+    @staticmethod
+    def _owner_in(path: Path, resolved_root: Path) -> str:
+        """The source_url in `path`, or "" if it cannot be trusted.
+
+        Resolve-then-verify, the same order vault.py's write guard uses and for
+        the same reason: a symlink inside the vault resolves out of it. Reading
+        through one is far less serious than writing through one — the result
+        only ever feeds an ownership comparison and never reaches output or a
+        filesystem path — but a symlinked `evil.md` could otherwise claim a URL
+        it does not own, and the conservative answer costs nothing.
+
+        Returning "" is the safe direction: the slug stays reserved, so the
+        worst case is a note getting a hash suffix it did not strictly need.
+        """
+        try:
+            if not path.resolve(strict=False).is_relative_to(resolved_root):
+                return ""
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        match = FRONTMATTER_SOURCE_URL.search(text)
+        return match.group(1) if match else ""
 
     def owner_of(self, slug: str) -> str | None:
         """The URL that owns `slug`, `""` if unknown, or None if it is free."""
