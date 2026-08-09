@@ -142,26 +142,48 @@ def _config_keys_on_disk(cfg) -> set[tuple[str, str]]:
     }
 
 
-@pytest.mark.xfail(
-    reason="BUG: five keys in config.toml are read by nothing. [download] "
-           "timeout_s / max_attempts / audio_format are the live ones — the "
-           "pipeline calls download() with three positional arguments, so its "
-           "function defaults win and editing config.toml changes nothing. "
-           "vault.meta_dir and paths.data_dir are documentation that looks "
-           "like configuration.",
-    strict=True,
-)
+# Keys deliberately present but not yet read. Each needs a reason, and the
+# reason has to be a decision that has not been made — not "we'll get to it".
+# Anything not listed here that nothing reads fails the check below.
+PENDING_CONFIG_KEYS: dict[tuple[str, str], str] = {
+    ("download", "max_attempts"): (
+        "no retry loop exists to configure. Arrives with the failure taxonomy "
+        "(3.2) and the store's retry policy (2.1), which interlock."
+    ),
+}
+
+
 def test_no_config_key_is_read_by_nothing(cfg) -> None:
     """The drift check that matters, in the direction that catches it.
 
     Asserting "the code's keys exist in config.toml" catches a rename. It
     cannot catch a key that is *only* in config.toml, which is the worse
     failure: the value looks configured, is edited with intent, and is inert.
+    `audio_format = "m4a"` sat there doing nothing, because the pipeline called
+    download() positionally and its function defaults won.
+
+    The escape hatch is an explicit list with a reason per key, so switching
+    this check off requires saying why in writing.
     """
     on_disk = _config_keys_on_disk(cfg)
     read = {k[:2] for k in _config_reads_in_source()}
-    dead = sorted(on_disk - read)
+    dead = sorted(on_disk - read - set(PENDING_CONFIG_KEYS))
     assert not dead, f"config.toml declares keys nothing reads: {dead}"
+
+
+def test_pending_config_keys_are_still_actually_pending(cfg) -> None:
+    """The allowlist must not outlive the reason for it.
+
+    Once a key IS read, leaving it listed here silently exempts it from the
+    check forever.
+    """
+    read = {k[:2] for k in _config_reads_in_source()}
+    stale = sorted(set(PENDING_CONFIG_KEYS) & read)
+    assert not stale, f"now read, so remove from PENDING_CONFIG_KEYS: {stale}"
+
+    on_disk = _config_keys_on_disk(cfg)
+    missing = sorted(set(PENDING_CONFIG_KEYS) - on_disk)
+    assert not missing, f"listed as pending but gone from config.toml: {missing}"
 
 
 def test_settings_builders_agree_with_the_shipped_config(cfg) -> None:

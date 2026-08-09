@@ -9,7 +9,7 @@ import pytest
 
 from doomnotes.consolidate import consolidate, plan_merges, plan_splits
 from doomnotes.models import Note
-from doomnotes.render import note_slug, render_note, render_transcript, slugify
+from doomnotes.render import SlugIndex, note_slug, render_note, render_transcript, slugify
 from doomnotes.tags import TagRegistry, normalise_tag
 from doomnotes.vault import VaultWriter
 
@@ -199,3 +199,90 @@ def test_consolidate_writes_through_the_guard(tmp_path: Path) -> None:
     writer.write_text("n.md", render_note(make_note(), None))
     consolidate(writer, "_meta/tags.json")
     assert (vault / "_meta" / "tags.json").is_file()
+
+
+# ── slug ownership across runs ───────────────────────────────────────────
+#
+# `note_slug` alone cannot decide a collision: it sees a name, not who holds
+# it. SlugIndex adds the owner, which is the difference between "another video
+# wants this name" (suffix it, keep both) and "this video already owns it"
+# (reuse it, overwrite in place). Runs are separate processes days apart, so
+# the index is rebuilt from the vault rather than accumulated in memory.
+
+
+def _vault_with(tmp_path: Path, notes: dict[str, str]) -> Path:
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir(exist_ok=True)
+    for slug, url in notes.items():
+        (root / f"{slug}.md").write_text(
+            f'---\ntitle: "t"\nsource_url: {url}\nplatform: instagram\n---\n\nbody\n',
+            encoding="utf-8",
+        )
+    return root
+
+
+def test_index_reads_ownership_from_existing_notes(tmp_path: Path) -> None:
+    root = _vault_with(tmp_path, {"a-note": "https://www.instagram.com/reel/AAA/"})
+    index = SlugIndex.from_vault(root)
+    assert index.owner_of("a-note") == "https://www.instagram.com/reel/AAA/"
+    assert index.owner_of("never-written") is None
+
+
+def test_a_different_video_wanting_a_taken_name_gets_a_suffix(tmp_path: Path) -> None:
+    root = _vault_with(tmp_path, {"shared-title": "https://www.instagram.com/reel/AAA/"})
+    index = SlugIndex.from_vault(root)
+    slug = index.claim(make_note(title="Shared title", source_url="https://www.instagram.com/reel/BBB/"))
+    assert slug != "shared-title"
+    assert slug.startswith("shared-title-")
+
+
+def test_the_same_video_reclaims_its_own_name(tmp_path: Path) -> None:
+    """Otherwise a re-run accumulates a hash-suffixed duplicate every time."""
+    url = "https://www.instagram.com/reel/AAA/"
+    root = _vault_with(tmp_path, {"shared-title": url})
+    index = SlugIndex.from_vault(root)
+    assert index.claim(make_note(title="Shared title", source_url=url)) == "shared-title"
+
+
+def test_claiming_is_recorded_within_a_run_too(tmp_path: Path) -> None:
+    """The in-memory half still has to work; the vault seed only adds to it."""
+    index = SlugIndex.from_vault(_vault_with(tmp_path, {}))
+    first = index.claim(make_note(title="Same", source_url="https://www.instagram.com/reel/AAA/"))
+    second = index.claim(make_note(title="Same", source_url="https://www.instagram.com/reel/BBB/"))
+    assert first != second
+
+
+def test_a_note_with_no_readable_source_url_still_reserves_its_name(tmp_path: Path) -> None:
+    """It is someone's note. Overwriting it would lose something.
+
+    Hand-written notes in the vault have no `source_url`, and the conservative
+    reading of an unknown owner is "not mine".
+    """
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    (root / "hand-written.md").write_text("# just a note I wrote\n", encoding="utf-8")
+    index = SlugIndex.from_vault(root)
+    slug = index.claim(make_note(title="Hand written", source_url="https://www.instagram.com/reel/AAA/"))
+    assert slug != "hand-written"
+
+
+def test_a_source_url_in_the_body_is_not_read_as_ownership(tmp_path: Path) -> None:
+    """A note quoting `source_url:` in its body must not claim that URL."""
+    root = tmp_path / "ai-notes-vault"
+    root.mkdir()
+    (root / "quoting.md").write_text(
+        '---\ntitle: "t"\nplatform: instagram\n---\n\n'
+        "    source_url: https://www.instagram.com/reel/AAA/\n",
+        encoding="utf-8",
+    )
+    index = SlugIndex.from_vault(root)
+    assert index.owner_of("quoting") == ""
+
+
+def test_transcripts_reserve_their_slug_too(tmp_path: Path) -> None:
+    """Note and transcript share a slug, so a free note name is not enough."""
+    root = tmp_path / "ai-notes-vault"
+    (root / "_transcripts").mkdir(parents=True)
+    (root / "_transcripts" / "orphaned.md").write_text("raw asr\n", encoding="utf-8")
+    index = SlugIndex.from_vault(root, subdirs=("_transcripts",))
+    assert "orphaned" in index

@@ -15,10 +15,15 @@ import hashlib
 import re
 import unicodedata
 from datetime import datetime
+from pathlib import Path
 
 from doomnotes.models import Note
 
 MAX_SLUG_LEN = 80
+
+# Cheap enough to read for every note in the vault, and anchored so a
+# `source_url:` line in a note *body* cannot be mistaken for the real one.
+FRONTMATTER_SOURCE_URL = re.compile(r"\A---\n(?:.*?\n)??source_url:[ \t]*(\S+)\s*$", re.M | re.S)
 
 
 def slugify(title: str) -> str:
@@ -34,16 +39,90 @@ def url_hash(url: str, length: int = 6) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:length]
 
 
-def note_slug(note: Note, taken: set[str] | None = None) -> str:
+def note_slug(note: Note, taken: "set[str] | SlugIndex | None" = None) -> str:
     """Slug for this note, with a short URL hash appended on collision.
 
     The hash is derived from the URL rather than a counter so that re-running a
     note lands on the same filename instead of accumulating `-2`, `-3` copies.
+
+    `taken` may be a bare set of slugs — in which case any match is treated as a
+    collision — or a `SlugIndex`, which knows *whose* slug each one is and so
+    can tell "another video wants this name" from "this video already owns it".
     """
     base = slugify(note.title)
-    if taken is None or base not in taken:
+    if taken is None:
+        return base
+    if isinstance(taken, SlugIndex):
+        return base if taken.owner_of(base) in (None, note.source_url) else (
+            f"{base}-{url_hash(note.source_url)}"
+        )
+    if base not in taken:
         return base
     return f"{base}-{url_hash(note.source_url)}"
+
+
+class SlugIndex:
+    """Which slugs are taken, and by which video.
+
+    Rebuilt from the vault at the start of each run, because runs are separate
+    processes days apart — an in-memory set only ever knew about the notes the
+    *current* run had written, so two videos that generated the same title in
+    two different runs quietly resolved to one file and the earlier note was
+    replaced. The store still recorded the lost video as done, so nothing
+    regenerated it and nothing reported it.
+
+    Keyed on `source_url` rather than on the slug alone, because the two cases
+    look identical from the filename and must not be treated alike:
+
+        another video wants this name  -> append the URL hash, keep both notes
+        this video already owns it     -> reuse the name, overwrite in place
+
+    Collapsing them either loses a note (always reuse) or accumulates a
+    duplicate on every re-run (always suffix).
+    """
+
+    def __init__(self, owners: dict[str, str] | None = None) -> None:
+        self._owners: dict[str, str] = dict(owners or {})
+
+    @classmethod
+    def from_vault(cls, root: str | Path, *, subdirs: tuple[str, ...] = ()) -> "SlugIndex":
+        """Read every note already in the vault and record who owns its slug.
+
+        Only the top level is scanned: `_transcripts/` mirrors note slugs by
+        construction, and `_meta/` holds no notes. A note without a readable
+        `source_url` still reserves its slug — it is someone's note, and the
+        conservative reading is that overwriting it would lose something.
+        """
+        root = Path(root)
+        owners: dict[str, str] = {}
+        for path in sorted(root.glob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                owners[path.stem] = ""
+                continue
+            match = FRONTMATTER_SOURCE_URL.search(text)
+            owners[path.stem] = match.group(1) if match else ""
+        for sub in subdirs:
+            for path in sorted((root / sub).glob("*.md")):
+                owners.setdefault(path.stem, "")
+        return cls(owners)
+
+    def owner_of(self, slug: str) -> str | None:
+        """The URL that owns `slug`, `""` if unknown, or None if it is free."""
+        return self._owners.get(slug)
+
+    def claim(self, note: Note) -> str:
+        """Allocate this note's slug and record the claim."""
+        slug = note_slug(note, self)
+        self._owners[slug] = note.source_url
+        return slug
+
+    def __contains__(self, slug: object) -> bool:
+        return slug in self._owners
+
+    def __len__(self) -> int:
+        return len(self._owners)
 
 
 def _yaml_scalar(value: str) -> str:

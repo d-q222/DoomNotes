@@ -22,6 +22,7 @@ from doomnotes.download import (
     build_command,
     classify,
     download,
+    fetch_url,
     sleep_seconds,
 )
 from doomnotes.models import VideoRef
@@ -163,6 +164,44 @@ def test_download_extracts_posted_at(tmp_path: Path) -> None:
     assert result.media is not None
     assert result.media.posted_at is not None
     assert result.media.posted_at.year == 2026
+
+
+# ── identity URL vs fetch URL ────────────────────────────────────────────
+
+
+def test_instagram_is_requested_exactly_as_the_export_gave_it() -> None:
+    """Instagram's export URLs are already canonical. Do not touch them."""
+    assert fetch_url(IG) == IG.url
+
+
+def test_tiktok_is_requested_via_the_form_yt_dlp_actually_supports() -> None:
+    """The export's host has no yt-dlp extractor; this form matches TikTokIE.
+
+    Checked against yt-dlp 2026.07.04's extractor table rather than assumed:
+    `www.tiktokv.com/share/video/<id>/` matches nothing and falls through to
+    the generic extractor, which has to fetch and follow a redirect. The id is
+    already in the URL, so the supported form costs no network to build — and
+    `@_` is yt-dlp's own placeholder for an unknown uploader.
+    """
+    assert fetch_url(TT) == "https://www.tiktok.com/@_/video/111"
+
+
+def test_the_fetch_url_does_not_become_the_refs_identity() -> None:
+    """The store keys on `ref.url`. Rewriting it would orphan every existing row."""
+    before = TT.url
+    fetch_url(TT)
+    assert TT.url == before
+
+
+def test_an_unparseable_tiktok_url_is_passed_through_unchanged() -> None:
+    """Better to let yt-dlp report a real error than to invent a URL."""
+    odd = VideoRef("https://www.tiktok.com/t/ZTRabcdef/", "tiktok")
+    assert fetch_url(odd) == odd.url
+
+
+def test_build_command_requests_the_fetch_url(tmp_path: Path) -> None:
+    cmd = build_command(TT, tmp_path, {"mode": "none"})
+    assert cmd[-1] == "https://www.tiktok.com/@_/video/111"
 
 
 def test_sleep_stays_within_configured_bounds() -> None:

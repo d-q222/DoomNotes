@@ -82,52 +82,90 @@ def _singular(tag: str) -> str:
     return tag
 
 
+def _related(a: str, b: str, threshold: float) -> bool:
+    """Whether two tags are variants of one another.
+
+    Two rules. Derivational suffixes catch garden/gardening, cook/cooking,
+    build/builder. Sequence similarity catches typos and spelling variants.
+    Deliberately NOT a general prefix rule — that merges `post` into `postgres`.
+    """
+    if "/" in a or "/" in b:
+        # Nested tags are pass-2 *output*. Merging one into its parent would
+        # undo the split this same pass just performed, and the two halves
+        # would fight each other on every run.
+        return False
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return _is_derivation(short, long) or (
+        difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+    )
+
+
 def plan_merges(counts: dict[str, int], threshold: float = 0.85) -> dict[str, str]:
     """Map near-duplicate tags onto a canonical one.
 
     Canonical = the most-used variant, tie-broken by shortest then alphabetical,
     so the result is deterministic and re-running produces the same answer.
+
+    Both rules — shared singular stem, and derivation/similarity — build
+    EQUIVALENCE GROUPS, and a canonical is chosen once per group at the end.
+
+    Why not apply them in sequence, tag onto tag: the first rule consumes the
+    token the second one needs. With {garden: 1, gardens: 2, gardening: 9},
+    stem-grouping picks `gardens` as canonical because it outnumbers `garden`,
+    and stage 2 then has only `gardens` to compare against — `gardens` is not a
+    derivation of `gardening`, so `gardening` never merges. Give `garden` the
+    larger count and the identical vocabulary consolidates fully. Whether a tag
+    merges must depend on the words, not on the tally.
+
+    That failure was also permanent rather than merely wrong: once notes have
+    been rewritten from `garden` to `gardens`, the bridging form no longer
+    exists in the vault, so no later run can recover it.
     """
-    merges: dict[str, str] = {}
-    # Group by singular stem first — catches garden/gardens, plant/plants.
+    parent: dict[str, str] = {t: t for t in counts}
+
+    def find(t: str) -> str:
+        while parent[t] != t:
+            parent[t] = parent[parent[t]]
+            t = parent[t]
+        return t
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Root choice here is arbitrary; the canonical is picked per group
+            # afterwards. Ordering by name keeps unions deterministic.
+            parent[max(ra, rb)] = min(ra, rb)
+
+    tags = sorted(counts)
+
+    # Shared singular stem — garden/gardens, plant/plants, coding/test(s).
     by_stem: dict[str, list[str]] = defaultdict(list)
-    for tag in counts:
+    for tag in tags:
         by_stem[_singular(tag)].append(tag)
-
-    def canonical(group: list[str]) -> str:
-        return sorted(group, key=lambda t: (-counts[t], len(t), t))[0]
-
     for group in by_stem.values():
-        if len(group) > 1:
-            keep = canonical(group)
-            for tag in group:
-                if tag != keep:
-                    merges[tag] = keep
+        for other in group[1:]:
+            union(group[0], other)
 
-    # Then derivational suffixes: garden/gardening, cook/cooking, build/builder.
-    # Deliberately NOT a general prefix rule — that merges `post` into
-    # `postgres`. Only these suffixes count, so the match stays morphological.
-    remaining = sorted(t for t in counts if t not in merges)
-    for i, a in enumerate(remaining):
-        for b in remaining[i + 1 :]:
-            if a in merges or b in merges or "/" in a or "/" in b:
-                continue
-            short, long = (a, b) if len(a) <= len(b) else (b, a)
-            if _is_derivation(short, long) or (
-                difflib.SequenceMatcher(None, a, b).ratio() >= threshold
-            ):
-                keep = canonical([a, b])
-                merges[b if keep == a else a] = keep
+    # Derivation and similarity, over every pair. Comparing raw tags rather
+    # than group representatives is what makes the result order-independent.
+    for i, a in enumerate(tags):
+        for b in tags[i + 1 :]:
+            if find(a) != find(b) and _related(a, b, threshold):
+                union(a, b)
 
-    # Collapse chains so a -> b -> c becomes a -> c.
-    for tag in list(merges):
-        seen = {tag}
-        target = merges[tag]
-        while target in merges and target not in seen:
-            seen.add(target)
-            target = merges[target]
-        merges[tag] = target
-    return {a: b for a, b in merges.items() if a != b}
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for tag in tags:
+        grouped[find(tag)].append(tag)
+
+    merges: dict[str, str] = {}
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        keep = sorted(group, key=lambda t: (-counts[t], len(t), t))[0]
+        for tag in group:
+            if tag != keep:
+                merges[tag] = keep
+    return merges
 
 
 def plan_splits(
@@ -153,6 +191,53 @@ def plan_splits(
         if mapping:
             splits[parent] = mapping
     return splits
+
+
+def _carry_descriptions(
+    old: TagRegistry,
+    merges: dict[str, str],
+    counts: dict[str, int],
+) -> dict[str, str]:
+    """Descriptions that should survive this pass, keyed by their new tag name.
+
+    Two rules:
+
+    - A tag that is not merged keeps its own description. Pass 2 rebuilds the
+      registry from note frontmatter, and frontmatter carries no descriptions,
+      so without this every annotation is silently emptied on every run — the
+      pass that runs after every batch quietly deleting the field #5.2 depends
+      on.
+
+    - A canonical tag with no description of its own inherits from the most-used
+      tag it absorbed. `garden` documented and `gardens` bare should not lose the
+      documentation just because the plural was more common. A canonical that
+      already has one keeps it: what the surviving name says about itself beats
+      what an absorbed variant said.
+
+    Splits deliberately inherit nothing. `coding/databases` is a narrower tag
+    than `coding`, so handing it the parent's description would assert something
+    about it that was never written.
+    """
+    out: dict[str, str] = {}
+    for tag, entry in old.tags.items():
+        description = (entry.get("description") or "").strip()
+        if description and tag not in merges:
+            out[tag] = description
+
+    absorbed: dict[str, list[str]] = defaultdict(list)
+    for source, target in merges.items():
+        absorbed[target].append(source)
+
+    for target, sources in absorbed.items():
+        if out.get(target):
+            continue
+        ranked = sorted(sources, key=lambda t: (-counts.get(t, 0), t))
+        for source in ranked:
+            inherited = (old.tags.get(source, {}).get("description") or "").strip()
+            if inherited:
+                out[target] = inherited
+                break
+    return out
 
 
 def _read_tags(text: str) -> list[str]:
@@ -210,6 +295,12 @@ def consolidate(
     if dry_run:
         return plan
 
+    # Counts are always recomputed from the notes — the notes are the truth and
+    # a stale count would be worse than none. Descriptions are not derivable
+    # from a note, so they are carried across instead of being rebuilt as "".
+    old_registry = TagRegistry.load(writer.root / registry_rel)
+    descriptions = _carry_descriptions(old_registry, plan.merges, dict(counts))
+
     new_registry = TagRegistry()
     for path, tags in per_note.items():
         text = path.read_text(encoding="utf-8")
@@ -233,7 +324,8 @@ def consolidate(
             seen.add(t)
             final.append(t)
 
-        new_registry.observe(final)
+        for tag in final:
+            new_registry.observe([tag], descriptions.get(tag, ""))
 
         if final != tags:
             rewritten = _rewrite(text, final, final[0] if final else None)

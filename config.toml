@@ -10,10 +10,14 @@
 # where the main vault lives. Changing this line cannot break that.
 path = "~/Documents/ai-notes-vault"
 transcripts_dir = "_transcripts"
-meta_dir = "_meta"
+# There is no meta_dir key: the registry's location is `tags.registry_file`
+# below, and a second key naming the same directory is a second source of
+# truth for it. Both are excluded in Obsidian's settings, not here.
 
+# audio/, logs/ and state.db all live under data/, which is gitignored.
+# Each is named in full rather than composed from a data_dir, so moving one
+# does not silently move the others.
 [paths]
-data_dir = "data"                 # audio/, logs/, state.db — gitignored
 state_db = "data/state.db"
 audio_dir = "data/audio"
 
@@ -40,8 +44,13 @@ cookies_file = "~/.config/doomnotes/cookies_tiktok.txt"
 
 [download]
 timeout_s = 180
-max_attempts = 3                  # naive default — see the taxonomy note in download.py
 audio_format = "m4a"
+# max_attempts is READ BY NOTHING and is left here on purpose, because there is
+# no retry loop for it to configure yet — that arrives with the failure taxonomy
+# (3.2) and the store's retry policy (2.1), which interlock. Named in the
+# PENDING list in tests/test_config.py so the dead-key check stays honest rather
+# than being switched off.
+max_attempts = 3
 
 [transcribe]
 # faster-whisper (CTranslate2) has no Metal backend — this runs on CPU.

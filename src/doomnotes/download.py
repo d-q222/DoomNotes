@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -119,6 +120,42 @@ def sleep_seconds(cfg_min: float, cfg_max: float, rng: random.Random | None = No
     return r.uniform(cfg_min, cfg_max)
 
 
+TIKTOK_VIDEO_ID = re.compile(r"/(?:share/)?video/(\d+)")
+
+
+def fetch_url(ref: VideoRef) -> str:
+    """The URL to hand yt-dlp, which is not always the ref's identity URL.
+
+    The ref's `url` is the store's primary key and stays exactly as the export
+    gave it. This is only what gets requested.
+
+    Why they differ for TikTok: the favourites export stores links as
+    `www.tiktokv.com/share/video/<id>/`, and yt-dlp 2026.07.04 has **no
+    extractor matching that host** — checked against its extractor table, not
+    assumed. It falls through to the generic extractor, which fetches the URL,
+    follows the redirect and re-dispatches. That costs an extra request per
+    video and depends on the redirect landing on a page the TikTok extractor
+    recognises rather than on a login or consent interstitial.
+
+    The id is already in the URL, so the supported form is constructible with
+    no network at all. `www.tiktok.com/@<user>/video/<id>` matches TikTokIE,
+    and the handle is optional — yt-dlp's own `TikTokBaseIE._create_url` builds
+    `https://www.tiktok.com/@{user_id or "_"}/video/{video_id}` when it does not
+    know the uploader, which is exactly our situation. So this is yt-dlp's
+    convention, not an invention of ours.
+
+    It matters asymmetrically: a failed TikTok download has no export caption to
+    fall back on, so it produces no note at all. Spending 91 first-batch
+    requests on a path that is merely probable is the expensive kind of wrong.
+
+    To revert: return `ref.url` unconditionally. Nothing else depends on this.
+    """
+    if ref.platform != "tiktok":
+        return ref.url
+    match = TIKTOK_VIDEO_ID.search(ref.url)
+    return f"https://www.tiktok.com/@_/video/{match.group(1)}" if match else ref.url
+
+
 def build_command(
     ref: VideoRef,
     audio_dir: Path,
@@ -150,7 +187,7 @@ def build_command(
         if cookie_path.is_file():
             cmd += ["--cookies", str(cookie_path)]
 
-    cmd.append(ref.url)
+    cmd.append(fetch_url(ref))
     return cmd
 
 

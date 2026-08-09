@@ -16,6 +16,7 @@ from pathlib import Path
 
 from doomnotes import config as config_mod
 from doomnotes.consolidate import consolidate
+from doomnotes.download import download, fetch_url
 from doomnotes.pipeline import Deps, run as run_batch
 from doomnotes.sources import ig_export, manual, tiktok_export
 from doomnotes.store import Store
@@ -101,7 +102,16 @@ def cmd_run(args, cfg) -> int:
 
     t_settings = transcribe_settings(cfg)
     s_settings = summarize_settings(cfg)
+    # The downloader is wired explicitly rather than left as Deps' default,
+    # because the default is `download` called with three positional arguments —
+    # which means its own function defaults win and the [download] section of
+    # config.toml is inert. Editing audio_format there used to change nothing.
+    timeout_s = int(cfg.get("download", "timeout_s", default=180))
+    audio_format = str(cfg.get("download", "audio_format", default="m4a"))
     deps = Deps(
+        downloader=lambda ref, audio_dir, auth: download(
+            ref, audio_dir, auth, timeout_s=timeout_s, audio_format=audio_format
+        ),
         transcriber=lambda p: transcribe(p, t_settings),
         summarizer=lambda ref, tr, media, reg: summarize(
             ref, tr, media, reg, s_settings
@@ -116,22 +126,34 @@ def cmd_run(args, cfg) -> int:
         cfg.get("pacing", "batch_cap", default=35)
     )
 
-    with Store(cfg.path("paths", "state_db")) as store:
-        result = run_batch(
-            refs,
-            store=store,
-            writer=writer,
-            registry=registry,
-            deps=deps,
-            audio_dir=cfg.path("paths", "audio_dir"),
-            auth_for=_auth_for(cfg),
-            transcripts_dir=cfg.get("vault", "transcripts_dir", default="_transcripts"),
-            limit=limit,
-            sleep_range=None if args.no_sleep else sleep_range,
-            keep_audio=args.keep_audio,
-        )
+    try:
+        with Store(cfg.path("paths", "state_db")) as store:
+            result = run_batch(
+                refs,
+                store=store,
+                writer=writer,
+                registry=registry,
+                deps=deps,
+                audio_dir=cfg.path("paths", "audio_dir"),
+                auth_for=_auth_for(cfg),
+                transcripts_dir=cfg.get("vault", "transcripts_dir", default="_transcripts"),
+                limit=limit,
+                sleep_range=None if args.no_sleep else sleep_range,
+                keep_audio=args.keep_audio,
+            )
+    finally:
+        # Persisted even when the run does not finish. A paced batch spends
+        # roughly half an hour asleep between downloads, so Ctrl-C partway
+        # through is an ordinary way for it to end — and the notes it already
+        # wrote are on disk either way. Without this, the vocabulary those
+        # notes contributed is dropped, and the next run's pass-1 prompt is
+        # handed a registry that disagrees with the vault, so it mints
+        # duplicates of tags that already exist.
+        #
+        # Not data loss: `doomnotes consolidate` rebuilds the registry from
+        # note frontmatter. It is a quality loss until someone does.
+        writer.write_text(registry_rel, registry.to_json())
 
-    writer.write_text(registry_rel, registry.to_json())
     print()
     print(result.summary())
     if result.stopped:
@@ -167,13 +189,24 @@ def cmd_check_auth(args, cfg) -> int:
     # a real saved post committed to a repository.
     for platform, example in (
         ("instagram", "<paste a /reel/ URL — `doomnotes parse` lists them>"),
-        ("tiktok", "<paste a tiktokv.com/share/video/ URL from the same output>"),
+        ("tiktok", "<paste the numeric id from a tiktokv.com/share/video/ URL>"),
     ):
         auth = cfg.get("auth", platform, default={}) or {}
         browser = auth.get("browser", "chrome")
         print(f"  # {platform}")
         print(f"  yt-dlp --cookies-from-browser {browser} -f 'ba/b' -x \\")
         print(f"    '{example}' -o 'data/authtest-{platform}.%(ext)s'\n")
+
+    print("Note on the TikTok URL. yt-dlp has no extractor for the")
+    print("www.tiktokv.com/share/video/ host the export uses, so it would fall")
+    print("through to the generic extractor and rely on a redirect. The")
+    print("pipeline therefore requests yt-dlp's own canonical form instead:")
+    print()
+    print("    https://www.tiktok.com/@_/video/<id>")
+    print()
+    print("Use that form above, so this probe tests what a real run will do.")
+    print("If it fails and the share URL works, revert `fetch_url` in")
+    print("download.py to return ref.url — nothing else depends on it.\n")
     print("Success = an audio file on disk. On failure, fall back to an")
     print("exported cookies.txt at")
     print("  ~/.config/doomnotes/cookies.txt   (chmod 600, outside this repo)")

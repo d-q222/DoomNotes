@@ -32,6 +32,7 @@ import pytest
 from doomnotes.download import DownloadResult, Outcome
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.pipeline import Deps, RunResult, process_one, run
+from doomnotes.render import SlugIndex
 from doomnotes.store import State, Store
 from doomnotes.summarize import SummarizeError
 from doomnotes.tags import TagRegistry
@@ -131,7 +132,7 @@ def process(ref: VideoRef, writer: VaultWriter, tmp_path: Path, **over):
         audio_dir=tmp_path / "audio",
         auth={},
         transcripts_dir="_transcripts",
-        taken_slugs=over.pop("taken_slugs", set()),
+        taken_slugs=over.pop("taken_slugs", SlugIndex.from_vault(writer.root)),
         **over,
     )
 
@@ -486,7 +487,13 @@ def test_a_transcription_failure_still_yields_a_caption_note(
     assert path is not None
 
 
-# ── known bug, fixed in the next PR ──────────────────────────────────────
+# ── cross-run filename identity ──────────────────────────────────────────
+#
+# These three are a set and only make sense together. The first two say two
+# different videos must never share a file; the third says one video re-run
+# must never gain a second file. Satisfying either pair alone is easy and
+# wrong — always suffix loses nothing but duplicates on every re-run, always
+# reuse never duplicates but silently destroys a note.
 
 
 def _same_title_summarizer(title: str = "Five AI tools you can replace with free ones"):
@@ -496,15 +503,6 @@ def _same_title_summarizer(title: str = "Five AI tools you can replace with free
     return inner
 
 
-@pytest.mark.xfail(
-    reason="BUG: the taken-slug set is rebuilt empty on every run, so collision "
-           "detection only sees notes written by the CURRENT run. A second run "
-           "producing the same title overwrites the first run's note in place — "
-           "no error, and the store still says the lost video is done, so it is "
-           "never regenerated. Paced runs are 30-40/day, so cross-run is the "
-           "normal case rather than the edge one.",
-    strict=True,
-)
 def test_a_later_run_does_not_overwrite_an_earlier_runs_note(
     writer: VaultWriter, store: Store, tmp_path: Path
 ) -> None:
@@ -535,14 +533,6 @@ def test_a_later_run_does_not_overwrite_an_earlier_runs_note(
     )
 
 
-@pytest.mark.xfail(
-    reason="BUG: same root cause, applied to the transcript. Note and "
-           "transcript share the slug, so both are replaced together and what "
-           "survives is an internally consistent pair for the second video. "
-           "Nothing dangles and nothing looks wrong — the first video simply "
-           "is not there, which is the harder kind of loss to notice.",
-    strict=True,
-)
 def test_a_later_run_does_not_overwrite_an_earlier_runs_transcript(
     writer: VaultWriter, store: Store, tmp_path: Path
 ) -> None:
