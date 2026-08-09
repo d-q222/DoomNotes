@@ -270,7 +270,12 @@ MERGE_ORDER_BUG = pytest.mark.xfail(
            "canonical is what stage 2 then has to match against. When the "
            "plural outnumbers the singular, `garden` is absorbed into "
            "`gardens` first, and `gardens`/`gardening` is not a derivation — "
-           "so `gardening` is stranded. Tier-1 #3's own example.",
+           "so `gardening` is stranded. Tier-1 #3's own example.\n"
+           "Worse, the stranding is PERMANENT. Once pass 2 has rewritten every "
+           "note from `garden` to `gardens`, the bridging tag no longer exists "
+           "anywhere, so a later run sees only {gardens, gardening} and merges "
+           "nothing. Re-running consolidation cannot repair it — which matters "
+           "because being safely re-runnable is the property pass 2 is sold on.",
     strict=True,
 )
 
@@ -313,10 +318,16 @@ def test_merging_does_not_depend_on_which_variant_is_most_used(
 
 
 @pytest.mark.xfail(
-    reason="BUG: consolidate() rebuilds the registry from scratch, so every "
-           "tag description is discarded on each run. The registry has a "
-           "`description` field precisely so an ambiguous tag ('growth' — "
-           "plants or startups?) can be disambiguated in the pass-1 prompt.",
+    reason="BUG: consolidate() never loads the existing registry — it builds a "
+           "new one from note frontmatter — so every description in "
+           "_meta/tags.json is wiped on every run, merged tags and untouched "
+           "tags alike.\n"
+           "Scope today, stated honestly: nothing populates `description` "
+           "automatically, so what this destroys is hand-written annotations "
+           "in tags.json and nothing else. It becomes live the moment #5.2 "
+           "injects descriptions to disambiguate a tag like `growth` (plants "
+           "or startups?) — at which point the field it depends on is being "
+           "silently emptied by a pass that runs after every batch.",
     strict=True,
 )
 def test_consolidation_preserves_tag_descriptions(writer: VaultWriter, vault: Path) -> None:

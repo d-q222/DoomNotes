@@ -536,10 +536,11 @@ def test_a_later_run_does_not_overwrite_an_earlier_runs_note(
 
 
 @pytest.mark.xfail(
-    reason="BUG: same root cause, applied to the transcript. Two runs, same "
-           "title, and the second run's raw ASR replaces the first's — while "
-           "the first note's wikilink still points at it, so the link resolves "
-           "to the wrong video's transcript rather than dangling visibly.",
+    reason="BUG: same root cause, applied to the transcript. Note and "
+           "transcript share the slug, so both are replaced together and what "
+           "survives is an internally consistent pair for the second video. "
+           "Nothing dangles and nothing looks wrong — the first video simply "
+           "is not there, which is the harder kind of loss to notice.",
     strict=True,
 )
 def test_a_later_run_does_not_overwrite_an_earlier_runs_transcript(
