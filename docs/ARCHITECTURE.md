@@ -327,3 +327,37 @@ videos that is the difference between fixing one thing and re-running everything
 **One exception is absolute:** a vault guard error is re-raised, never swallowed. It means a
 write was about to land outside the vault. That is a stop, not an item failure, and no
 isolation policy may downgrade it to a logged warning.
+
+---
+
+## Run journal
+
+An append-only JSONL record under `data/logs/`, one object per event: run started, each video,
+each pacing sleep, run finished. `doomnotes journal` reads it back.
+
+**It records; it does not react.** That constraint is load-bearing rather than minimalist. A
+journal that counted consecutive same-stage failures and stopped the run would be making the
+failure-isolation decision — and making it inside a module named "logging", where nobody would
+look for it. What to *do* about what it records belongs to the isolation policy.
+
+Why it is needed at all: the run summary reports totals, so 29 failures look like 29 problems,
+and the store keeps only the latest state per URL, overwritten on each attempt. Neither can
+say that videos 6 through 14 failed at the same stage in an unbroken run — which is what a
+dead model server looks like from outside, and is one problem rather than nine.
+
+```
+run 20260809T0812   14 video(s)
+  summarize         9     0.0-0.0s   videos 6-14  <- unbroken run
+  caption_only      5     0.0-0.0s   videos 1-5   <- unbroken run
+```
+
+JSONL rather than a table or a single document, because a run can be killed at any moment and
+a torn write should cost one line rather than the file. Reading skips unparseable lines for
+the same reason. A run with no `run_finished` record is one whose process did not reach the
+end, which is a different thing from a run that completed with failures.
+
+Every write is failure-tolerant: an unwritable path degrades to no journal, never to a raised
+exception. An observability feature that can abort a rate-limited batch is worse than none.
+
+The journal contains saved-video URLs, exactly as the store does. It lives under `data/`,
+gitignored and blocked by path in the pre-commit hook, and never inside the vault.

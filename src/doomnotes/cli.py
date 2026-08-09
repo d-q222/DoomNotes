@@ -4,6 +4,7 @@
     doomnotes status       # what the store thinks is done
     doomnotes run          # process a batch (needs auth — see check-auth)
     doomnotes consolidate  # tag pass 2
+    doomnotes journal      # what recent runs actually did
     doomnotes check-auth   # single auth probe, one video per platform
 """
 
@@ -17,13 +18,14 @@ from pathlib import Path
 from doomnotes import config as config_mod
 from doomnotes.consolidate import consolidate
 from doomnotes.download import download, fetch_url
+from doomnotes.journal import open_journal, read_runs
 from doomnotes.pipeline import Deps, run as run_batch
 from doomnotes.sources import ig_export, manual, tiktok_export
 from doomnotes.store import Store
 from doomnotes.summarize import settings_from_config as summarize_settings, summarize
 from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import settings_from_config as transcribe_settings, transcribe
-from doomnotes.vault import VaultGuardError, VaultWriter
+from doomnotes.vault import VaultGuardError, VaultWriter, check_vault_root
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +42,41 @@ def _auth_for(cfg):
     def inner(platform: str) -> dict:
         return dict(cfg.get("auth", platform, default={}) or {})
     return inner
+
+
+DEFAULT_RUN_LOG = "data/logs/runs.jsonl"
+
+
+def _run_log(cfg, *, for_writing: bool) -> Path | None:
+    """The journal path, or None when journalling is switched off.
+
+    An empty string means off, deliberately — a missing key falls back to the
+    default rather than silently disabling the record, because a config written
+    before this existed should still get one.
+
+    `for_writing` is the whole reason this takes a flag. Refusing a path inside
+    the vault protects the vault from gaining a file that is not a note; that is
+    a concern about *writing*. Reading a journal that is already on disk puts
+    nothing anywhere, so applying the same hard stop there would only mean
+    `doomnotes journal` cannot show you a file you can see in Finder — a refusal
+    that protects nothing.
+    """
+    if not cfg.get("paths", "run_log", default=DEFAULT_RUN_LOG):
+        return None
+    path = cfg.path("paths", "run_log", default=DEFAULT_RUN_LOG)
+    if not for_writing:
+        return path
+    try:
+        vault_root = check_vault_root(cfg.vault_root)
+    except VaultGuardError:
+        return path  # the vault is unusable; cmd_run reports that on its own
+    if path.resolve(strict=False).is_relative_to(vault_root):
+        raise VaultGuardError(
+            f"paths.run_log ({path}) is inside the vault at {vault_root}. "
+            f"The run journal holds saved-video URLs and is not a note — keep "
+            f"it under data/."
+        )
+    return path
 
 
 def cmd_parse(args, cfg) -> int:
@@ -129,7 +166,14 @@ def cmd_run(args, cfg) -> int:
     )
 
     try:
-        with Store(cfg.path("paths", "state_db")) as store:
+        run_log = _run_log(cfg, for_writing=True)
+    except VaultGuardError as exc:
+        print(f"vault guard refused the run journal path: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        with open_journal(run_log) as journal, \
+                Store(cfg.path("paths", "state_db")) as store:
             result = run_batch(
                 refs,
                 store=store,
@@ -142,6 +186,7 @@ def cmd_run(args, cfg) -> int:
                 limit=limit,
                 sleep_range=None if args.no_sleep else sleep_range,
                 keep_audio=args.keep_audio,
+                journal=journal,
             )
     finally:
         # Persisted even when the run does not finish. A paced batch spends
@@ -185,6 +230,101 @@ def cmd_consolidate(args, cfg) -> int:
     print(plan.render())
     if args.dry_run:
         print("\n(dry run — nothing was written)")
+    return 0
+
+
+def cmd_journal(args, cfg) -> int:
+    """Read the run journal back. Reports; decides nothing.
+
+    The grouping below is the whole point of 7.2: the run summary says "29
+    failed", and `state.db` keeps only the latest state per URL. Neither can
+    tell you that videos 12 through 30 all failed at the same stage within
+    400 ms of each other, which is what a dead Ollama looks like from outside.
+    """
+    path = _run_log(cfg, for_writing=False)
+    if path is None:
+        print("journalling is off — set paths.run_log in config.toml")
+        return 0
+
+    try:
+        records = read_runs(path)
+    except OSError as exc:
+        # An unreadable journal is a real problem worth naming. Reporting it as
+        # "no runs recorded yet" would be worse than the traceback it replaces.
+        print(f"could not read the run journal at {path}: {exc}", file=sys.stderr)
+        return 2
+
+    if not records:
+        print(f"no runs recorded yet at {path}")
+        return 0
+
+    # Records are whatever is on disk, which may include lines this tool did
+    # not write. Anything that is not an object is skipped rather than crashed
+    # on, so `read_runs`'s promise of tolerance holds for its own consumer too.
+    records = [r for r in records if isinstance(r, dict)]
+
+    run_ids: list[str] = []
+    for rec in records:
+        run_id = rec.get("run_id") or "(no run id)"
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+
+    # `--last 0` must mean nothing, not everything: `run_ids[-0:]` is the whole
+    # list, because Python has no negative zero.
+    count = max(0, int(args.last))
+    for run_id in (run_ids[-count:] if count else []):
+        rows = [r for r in records if (r.get("run_id") or "(no run id)") == run_id]
+        videos = [r for r in rows if r.get("event") == "video"]
+        finished = next((r for r in rows if r.get("event") == "run_finished"), None)
+
+        print(f"\nrun {run_id}   {len(videos)} video(s)"
+              + ("" if finished else "   [did not finish]"))
+        print("-" * 60)
+
+        by_stage: dict[str, list[dict]] = {}
+        for row in videos:
+            by_stage.setdefault(row.get("stage") or row.get("status") or "?", []).append(row)
+
+        for stage, rows_for_stage in sorted(by_stage.items(), key=lambda kv: -len(kv[1])):
+            # Positions come from the pipeline's own `n`, never from counting
+            # these rows. Numbering survivors renumbers everything after a
+            # dropped record, which would turn scattered failures into a
+            # spurious "unbroken run" — the exact claim you would act on.
+            positions = sorted(r["n"] for r in rows_for_stage if isinstance(r.get("n"), int))
+            seconds = [s for r in rows_for_stage if isinstance(s := r.get("seconds"), (int, float))]
+            span = f"{min(seconds):>5.1f}-{max(seconds):.1f}s" if seconds else " " * 11
+
+            where = ""
+            if positions:
+                # Consecutive is only assertable when every record is present.
+                # If any went missing, say where they were and stop short of a
+                # causal claim the data cannot support.
+                complete = len(positions) == len(rows_for_stage)
+                consecutive = positions == list(range(positions[0], positions[-1] + 1))
+                where = (
+                    f"video {positions[0]}"
+                    if len(positions) == 1
+                    else f"videos {positions[0]}-{positions[-1]}"
+                )
+                if len(positions) > 1 and not consecutive:
+                    where += ", scattered"
+                elif consecutive and len(positions) > 2 and complete:
+                    where += "  <- unbroken run"
+            print(f"  {stage:<14} {len(rows_for_stage):>4}   {span}   {where}")
+
+        slept = [s for r in rows if r.get("event") == "slept"
+                 and isinstance(s := r.get("seconds"), (int, float))]
+        if slept:
+            print(f"  {'(slept)':<14} {len(slept):>4}   "
+                  f"{min(slept):.0f}-{max(slept):.0f}s, total {sum(slept)/60:.1f} min")
+
+        if args.errors:
+            # Prints saved-video URLs to the terminal, deliberately — you need
+            # to know which video failed. Behind a flag so it is never in the
+            # default output, and so it is never in a screenshot by accident.
+            for row in videos:
+                if row.get("detail"):
+                    print(f"    {row.get('url')}\n      {row['detail']}")
     return 0
 
 
@@ -260,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("consolidate", help="tag pass 2: merge + sub-cluster split")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_consolidate)
+
+    p = sub.add_parser("journal", help="what recent runs actually did")
+    p.add_argument("--last", type=int, default=3, help="how many runs to show")
+    p.add_argument("--errors", action="store_true", help="list each failure's message")
+    p.set_defaults(func=cmd_journal)
 
     p = sub.add_parser("check-auth", help="print the manual cookie-auth probe")
     p.set_defaults(func=cmd_check_auth)

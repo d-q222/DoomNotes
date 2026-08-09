@@ -20,6 +20,10 @@ transcripts_dir = "_transcripts"
 [paths]
 state_db = "data/state.db"
 audio_dir = "data/audio"
+# Append-only JSONL record of every run. Contains your saved-video URLs, exactly
+# as state.db does — gitignored, and blocked by path in the pre-commit hook.
+# Set to "" to switch journalling off entirely.
+run_log = "data/logs/runs.jsonl"
 
 [pacing]
 # Deliberately naive — see the pacing note in download.py

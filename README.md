@@ -103,9 +103,10 @@ src/doomnotes/
   tags.py                registry read/write, prompt injection
   consolidate.py         merge + sub-cluster split
   render.py              Note -> markdown, slugs, wikilinks
+  journal.py             append-only JSONL record of every run
   vault.py               write guard + atomic write
   pipeline.py            orchestration, stage isolation
-  cli.py                 doomnotes {parse,run,status,consolidate,check-auth}
+  cli.py                 doomnotes {parse,run,status,consolidate,journal,check-auth}
 scripts/                 smoke tests, spine test, benchmarks, secret guards
 data/                    gitignored: audio/, logs/, state.db, run traces
 private/                 gitignored: personal working notes

@@ -33,6 +33,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from doomnotes.download import DownloadResult, Outcome  # noqa: E402
+from doomnotes.journal import RunJournal, read_runs  # noqa: E402
 from doomnotes.models import Media, Note, VideoRef  # noqa: E402
 from doomnotes.pipeline import Deps, run as run_batch  # noqa: E402
 from doomnotes.store import Store  # noqa: E402
@@ -131,11 +132,12 @@ def main() -> int:
     print("Offline spine test — no Instagram or TikTok traffic")
     print("=" * 66)
 
-    with Store(workdir / "state.db") as store:
+    run_log = workdir / "logs" / "runs.jsonl"
+    with Store(workdir / "state.db") as store, RunJournal(run_log, run_id="spine") as journal:
         result = run_batch(
             REFS, store=store, writer=writer, registry=registry, deps=deps,
             audio_dir=workdir / "audio", auth_for=lambda p: {},
-            limit=None, sleep_range=None,
+            limit=None, sleep_range=None, journal=journal,
         )
         print(result.summary())
 
@@ -195,6 +197,26 @@ def main() -> int:
             if "has_transcript: false" in text and "Raw transcript" in text:
                 bad_flag.append(note_path.name)
         check("caption-only notes carry no transcript link", not bad_flag, str(bad_flag))
+
+        # ── the run journal (7.2) ─────────────────────────────────────
+        print("\n  Run journal")
+        print("  " + "-" * 62)
+        records = read_runs(run_log)
+        events = [r.get("event") for r in records]
+        journalled = [r for r in records if r.get("event") == "video"]
+        check("journal recorded start and finish",
+              events[:1] == ["run_started"] and events[-1:] == ["run_finished"], str(events[:1] + events[-1:]))
+        # Deliberately not "exactly one per attempted video": an isolation
+        # policy that breaks out of the loop after incrementing `attempted`
+        # would desync the two, and that is 7.1's call to make, not a
+        # regression in the journal.
+        check("journal recorded every video it saw, and no more",
+              0 < len(journalled) <= result.attempted,
+              f"{len(journalled)} vs {result.attempted}")
+        check("every failure carries the stage that produced it",
+              all(r.get("stage") for r in journalled if r.get("status") == "failed"))
+        check("journal never lands in the vault",
+              not list(vault.rglob("*.jsonl")))
 
         # ── malformed URL, handled at the source ──────────────────────
         # The plan's fifth case. A malformed URL must be dropped by the source
