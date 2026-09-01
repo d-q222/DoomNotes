@@ -326,6 +326,11 @@ def run(
         notes_written=out.notes_written,
         caption_only=out.caption_only,
         failed=out.failed,
+        # Broken out of `failed` because they mean different things to a reader
+        # of the journal weeks later: retryable will resolve itself, blocked
+        # will not resolve without someone fixing credentials.
+        retryable=out.retryable,
+        blocked=out.blocked,
         stopped=out.stopped,
         stop_reason=out.stop_reason,
         per_stage_failures=out.per_stage_failures,

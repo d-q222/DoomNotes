@@ -173,11 +173,11 @@ class Store:
         path, which is the point: the fault is in the credentials and gets
         fixed there, not by exhausting the queue.
 
-        The attempt is counted whatever the cause, including a batch-wide one
-        such as a rate limit. That is deliberate: it is what bounds the retry.
-        The cost is that a run which is rate-limited throughout spends one
-        attempt on every video in it, so the write-off is surfaced by state in
-        `stats()` rather than left to be discovered.
+        Apart from that exemption the attempt is counted whatever the cause,
+        including a batch-wide one such as a rate limit. That is deliberate: it
+        is what bounds the retry. The cost is that a run which is rate-limited
+        throughout spends one attempt on every video in it, so the write-off is
+        surfaced by state in `stats()` rather than left to be discovered.
         """
         state = State.FAILED
         if not terminal:
