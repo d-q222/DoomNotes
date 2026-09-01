@@ -73,7 +73,10 @@ done
 # a different thing. Threshold, not a ban.
 THRESHOLD=5
 while IFS= read -r f; do
-  [ -f "$f" ] || continue
+  # Deliberately NOT `[ -f "$f" ] || continue`. What is committed is the staged
+  # blob, not the working tree, so a file staged and then deleted from the
+  # working tree would skip this scan entirely while still going into the
+  # commit. `git show ":$f"` reads the index, which is the thing being checked.
   # Read the blob once, into a variable rather than through a pipe.
   #
   # `git show ":$f" | grep -q PRAGMA` was the obvious spelling and was wrong:
@@ -92,7 +95,7 @@ while IFS= read -r f; do
       ;;
   esac
   n=$(printf '%s\n' "$blob" \
-      | grep -oEa 'instagram\.com/(reel|reels|p|tv)/[A-Za-z0-9_-]{5,}|tiktokv?\.com/(share/)?video/[0-9]{6,}' \
+      | grep -oEa 'instagram\.com/(reel|reels|p|tv)/[A-Za-z0-9_-]{5,}|tiktokv?\.com/(share/)?(@[A-Za-z0-9_.]+/)?video/[0-9]{6,}' \
       | sort -u | wc -l | tr -d ' ')
   if [ "${n:-0}" -gt "$THRESHOLD" ]; then
     red "BLOCKED  $f  — contains $n distinct saved-video URLs (limit $THRESHOLD)"
