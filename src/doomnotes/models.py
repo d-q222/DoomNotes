@@ -69,6 +69,13 @@ class VideoRef:
                 f"caption_source must be one of {_CAPTION_SOURCES}, "
                 f"got {self.caption_source!r}: {self.url}"
             )
+        # Deliberately NOT rejected: platform="tiktok" with caption_source="export".
+        # No adapter can emit it — each declares its own provenance, asserted in
+        # tests/test_sources.py — and the only rule that would reject it, "tiktok
+        # implies not export", encodes a fact about TikTok's *export file format*
+        # rather than about the platform. That belongs to the adapter that reads
+        # the file, not to the shape every stage passes around, and it would be
+        # wrong the first time either export schema grows.
         if self.caption_source == "media" and (self.caption or "").strip():
             raise ValueError(
                 f"caption_source='media' but a caption is already present: {self.url}. "
