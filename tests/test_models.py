@@ -54,6 +54,17 @@ def test_the_rejection_covers_every_construction_path() -> None:
         VideoRef(IG_URL, "instagram", caption_source="media", caption="text")
 
 
+def test_an_unrecognised_caption_source_is_rejected() -> None:
+    """`Literal` is a type-checker annotation, not a runtime constraint.
+
+    A typo reads as "not export", so an Instagram ref that shipped its caption
+    would silently stop being salvageable: the download fails, the salvage
+    branch declines, and the store records it as done. Nothing reports it.
+    """
+    with pytest.raises(ValueError, match="caption_source must be one of"):
+        VideoRef(IG_URL, "instagram", caption_source="exprot", caption="text")
+
+
 def test_media_is_the_default_so_forgetting_fails_safe() -> None:
     """An undeclared ref is treated as unsalvageable rather than assumed good.
 

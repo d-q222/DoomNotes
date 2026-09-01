@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 Platform = Literal["instagram", "tiktok"]
 
@@ -23,6 +23,7 @@ Platform = Literal["instagram", "tiktok"]
 # so it is in hand before any download. "media" means it arrives with the
 # download itself, so a failed download leaves nothing to salvage.
 CaptionSource = Literal["export", "media"]
+_CAPTION_SOURCES = get_args(CaptionSource)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,14 @@ class VideoRef:
         download. This lives on the model rather than in an adapter so it holds
         for every construction path — tests and future sources included.
         """
+        if self.caption_source not in _CAPTION_SOURCES:
+            # `Literal` is a type-checker annotation, not a runtime constraint.
+            # An unrecognised value would read as "not export" and silently make
+            # a salvageable Instagram ref unsalvageable.
+            raise ValueError(
+                f"caption_source must be one of {_CAPTION_SOURCES}, "
+                f"got {self.caption_source!r}: {self.url}"
+            )
         if self.caption_source == "media" and (self.caption or "").strip():
             raise ValueError(
                 f"caption_source='media' but a caption is already present: {self.url}. "
