@@ -47,7 +47,7 @@ from doomnotes.download import DownloadResult, Outcome, download, sleep_seconds
 from doomnotes.journal import Journal, NullJournal
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.render import SlugIndex, render_note, render_transcript
-from doomnotes.store import Store
+from doomnotes.store import MAX_ATTEMPTS, Store
 from doomnotes.summarize import SummarizeError, summarize
 from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import transcribe
@@ -106,11 +106,17 @@ def process_one(
     transcripts_dir: str,
     taken_slugs: SlugIndex,
     keep_audio: bool = False,
+    last_chance: bool = True,
 ) -> tuple[str, str | None, Path | None]:
     """Run one ref through every stage.
 
     Returns (status, detail, note_path) where status is one of:
     "written", "caption_only", "retry", "failed", "stop".
+
+    `last_chance` says whether a retryable failure here would exhaust the
+    video's attempts. It defaults to True — salvage now — because a caller
+    without a store has no way to record a retry, so deferring would lose the
+    video rather than postpone it.
     """
     # -- download ---------------------------------------------------------
     result = deps.downloader(ref, audio_dir, auth)
@@ -132,11 +138,17 @@ def process_one(
         # A download failure is only survivable when the caption is already in
         # hand. Instagram's export carries it; TikTok's does not, and neither do
         # manual or Playwright refs — their caption arrives with the media.
+        # A retryable cause returns to the queue while attempts remain, even
+        # when a caption is in hand: settling for a caption-only note now would
+        # trade the real transcript for a degraded note the video may not need.
+        # The caption is still there on the last attempt, so nothing is lost by
+        # waiting — only by settling early.
+        if result.outcome is Outcome.RETRYABLE and not last_chance:
+            return "retry", f"download:{result.reason}: {result.error}", None
+
+        # Terminal, or out of attempts. Salvage the caption if there is one.
         if not ref.has_export_caption:
-            # A retryable cause returns to the queue next run; a terminal one is
-            # written off now. The store enforces the attempt cap.
-            status = "retry" if result.outcome is Outcome.RETRYABLE else "failed"
-            return status, f"download:{result.reason}: {result.error}", None
+            return "failed", f"download:{result.reason}: {result.error}", None
 
     # -- summarize --------------------------------------------------------
     try:
@@ -207,6 +219,7 @@ def run(
                 transcripts_dir=transcripts_dir,
                 taken_slugs=taken,
                 keep_audio=keep_audio,
+                last_chance=store.attempts_for(ref.url) >= MAX_ATTEMPTS - 1,
             )
         except VaultGuardError:
             # Never swallowed. A write was about to land outside the vault.

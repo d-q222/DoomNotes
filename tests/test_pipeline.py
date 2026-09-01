@@ -33,7 +33,7 @@ from doomnotes.download import DownloadResult, Outcome
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.pipeline import Deps, RunResult, process_one, run
 from doomnotes.render import SlugIndex
-from doomnotes.store import State, Store
+from doomnotes.store import MAX_ATTEMPTS, State, Store
 from doomnotes.summarize import SummarizeError
 from doomnotes.tags import TagRegistry
 from doomnotes.vault import VaultGuardError, VaultWriter
@@ -671,3 +671,83 @@ def test_a_transient_download_failure_is_left_retryable(
     assert result.retryable == 1
     assert store.state_of(TT.url) is State.RETRYABLE
     assert [r.url for r in store.filter_unprocessed([TT])] == [TT.url]
+
+
+def test_a_transient_failure_does_not_settle_for_the_caption_yet(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """An Instagram ref has a caption, so it *could* be salvaged immediately.
+
+    It should not be. A 429 says nothing about the video, and writing the
+    caption-only note now trades the real transcript for a degraded note while
+    attempts remain. The caption is not going anywhere.
+    """
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.notes_written == 0, "no note while a retry is still possible"
+    assert result.caption_only == 0
+    assert result.retryable == 1
+    assert store.state_of(IG.url) is State.RETRYABLE
+    assert list(writer.root.glob("*.md")) == []
+
+
+def test_the_caption_is_salvaged_on_the_last_attempt(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Deferring must not become losing.
+
+    Once the attempts are spent the video is written off either way, so the
+    caption-only note is strictly better than nothing — which is the whole
+    reason the salvage path exists.
+    """
+    store.register([IG])
+    for _ in range(MAX_ATTEMPTS - 1):
+        store.mark_failed(IG.url, "HTTP Error 429: Too Many Requests", terminal=False)
+
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.caption_only == 1, "the last attempt falls back to the caption"
+    assert store.state_of(IG.url) is State.DONE
+    assert len(list(writer.root.glob("*.md"))) == 1
+
+
+def test_a_terminal_failure_salvages_immediately(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """A deleted video is not coming back, so there is nothing to wait for."""
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.TERMINAL, "Video unavailable")),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.caption_only == 1
+    assert result.retryable == 0
+    assert store.state_of(IG.url) is State.DONE

@@ -167,10 +167,7 @@ class Store:
         """
         state = State.FAILED
         if not terminal:
-            row = self.conn.execute(
-                "SELECT attempts FROM videos WHERE url=?", (url,)
-            ).fetchone()
-            attempted = (row["attempts"] if row else 0) + 1
+            attempted = self.attempts_for(url) + 1
             state = State.FAILED if attempted >= MAX_ATTEMPTS else State.RETRYABLE
 
         self.conn.execute(
@@ -179,6 +176,18 @@ class Store:
             (state, error[:500], _now(), url),
         )
         self.conn.commit()
+
+    def attempts_for(self, url: str) -> int:
+        """How many times this URL has already been attempted.
+
+        The pipeline reads this to know whether the attempt it is about to make
+        is the last one, which decides whether a retryable failure holds the
+        video for another run or falls back to a caption-only note.
+        """
+        row = self.conn.execute(
+            "SELECT attempts FROM videos WHERE url=?", (url,)
+        ).fetchone()
+        return row["attempts"] if row else 0
 
     def state_of(self, url: str) -> State | None:
         cur = self.conn.execute("SELECT state FROM videos WHERE url=?", (url,))
