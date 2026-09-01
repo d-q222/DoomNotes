@@ -17,6 +17,7 @@ import pytest
 
 from doomnotes.download import (
     DownloadResult,
+    failure_reason,
     Outcome,
     RunnerResult,
     build_command,
@@ -194,3 +195,38 @@ def test_sleep_stays_within_configured_bounds() -> None:
     rng = random.Random(0)
     for _ in range(200):
         assert 20.0 <= sleep_seconds(20, 90, rng) <= 90.0
+
+
+# ── descriptive failure reasons (3.2) ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "stderr,expected",
+    [
+        ("ERROR: [Instagram] AAA: Video unavailable", "deleted"),
+        ("ERROR: [Instagram] AAA: This post is private", "private"),
+        ("ERROR: [TikTok] 111: content isn't available", "unavailable_here"),
+        ("ERROR: unable to download video data: HTTP Error 404: Not Found", "not_found"),
+        ("ERROR: unable to download webpage: HTTP Error 429: Too Many Requests", "rate_limited"),
+        ("ERROR: unable to download webpage: HTTP Error 503: Service Unavailable", "server_error"),
+        ("ERROR: Unable to download webpage: <urlopen error timed out>", "timeout"),
+        ("ERROR: [Instagram] Requested content is not available, login_required", "session_dead"),
+        ("ERROR: [Instagram] challenge_required: checkpoint", "checkpoint"),
+        ("ERROR: something nobody has seen before", "unknown"),
+    ],
+)
+def test_failure_reason_is_descriptive(stderr: str, expected: str) -> None:
+    """'the video failed' is not a diagnosis. The store records this instead."""
+    assert failure_reason(stderr) == expected
+
+
+@pytest.mark.parametrize("stderr,expected,note", REAL_ERRORS)
+def test_reason_and_outcome_cannot_disagree(stderr: str, expected: Outcome, note: str) -> None:
+    """Both read the same tables, so a reason always implies its own bucket.
+
+    If these could drift, a failure could be reported as "deleted" while being
+    retried, or as "rate_limited" while being written off.
+    """
+    reason = failure_reason(stderr)
+    assert reason != "unknown", f"{note} should have a named reason"
+    assert classify(1, stderr) is expected

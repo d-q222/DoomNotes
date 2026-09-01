@@ -642,3 +642,32 @@ def test_a_systemic_stage_outage_does_not_consume_the_batch(
 # stops being a specification and becomes a mechanism the decision has to obey.
 # The gap is documented in pipeline.py's HANDS-ON block and HANDS_ON.md §7.1;
 # it stays prose until the shape of the seam is chosen.
+
+
+def test_a_transient_download_failure_is_left_retryable(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """The TikTok case the whole decision is for.
+
+    No export caption means nothing to salvage, so the only thing standing
+    between a rate limit and a permanently lost video is that the store offers
+    it again. Asserting the state, not just the counter, because the counter
+    would look identical if it were written off.
+    """
+    result = run(
+        [TT],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.failed == 1
+    assert result.retryable == 1
+    assert store.state_of(TT.url) is State.RETRYABLE
+    assert [r.url for r in store.filter_unprocessed([TT])] == [TT.url]

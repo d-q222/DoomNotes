@@ -114,7 +114,9 @@ def cmd_status(args, cfg) -> int:
         if failures:
             print(f"\n  {len(failures)} failures (most recent first):")
             for row in failures[:10]:
-                print(f"    {row['url']}\n      {row['error']}")
+                waiting = " — will retry next run" if row["state"] == "retryable" else ""
+                print(f"    {row['url']}  [{row['state']}, attempt {row['attempts']}]{waiting}")
+                print(f"      {row['error']}")
     return 0
 
 

@@ -1,30 +1,29 @@
 """Processed-URL store. SQLite, keyed on canonical URL.
 
-    # ── DELIBERATELY NAIVE: failure state handling ──────────────────────────
-    # CURRENT: three states, but `mark_failed` writes FAILED for every error
-    #   regardless of cause, and FAILED counts as processed forever.
-    #
-    # WHY THAT IS INSUFFICIENT: a transient error is indistinguishable from a
-    #   permanent one. One network blip, one rate-limit, one interrupted run,
-    #   and that video is excluded from every future queue — silently, because
-    #   it looks exactly like a deleted video. On Instagram the caption note
-    #   survives; on TikTok there is no caption, so the video is simply absent
-    #   and nothing reports it. The `attempts` column is written but never
-    #   read, which is the tell.
-    #
-    # INTENDED: decide whether RETRYABLE is a distinct state or a predicate
-    #   over (state, attempts, last_attempt); whether retries need backoff
-    #   before re-entering the queue; and what a STOPPED run leaves behind so
-    #   resuming is correct. This interlocks with the download failure taxonomy
-    #   — that decides which bucket an error lands in, this decides what each
-    #   bucket costs. See tests/test_store.py.
-    #
-    # INVARIANT — do not change: the store is authoritative and keys on URL
-    #   only. It must never consult the vault to decide what is processed. If
-    #   it did, deleting a note would silently re-download and re-summarise it.
-    #   The isolation test ("delete a note, re-run, it must not reappear")
-    #   holds that line.
-    # ────────────────────────────────────────────────────────────────────────
+States and what each costs (decision 2.1):
+
+    PENDING    never attempted, or attempted in a run that halted before
+               reaching it. Enters every queue.
+    RETRYABLE  failed for a cause that may not recur. Re-enters the queue on
+               the NEXT run -- there is no in-run retry, because the condition
+               that caused the failure almost always outlives the run, and
+               retrying a 429 sooner is precisely the wrong move. The daily
+               cadence is the backoff.
+    FAILED     terminal, or retried MAX_ATTEMPTS times without success. Never
+               re-enters a queue.
+    DONE       a note was written.
+
+`processed_urls()` is DONE and FAILED. RETRYABLE is deliberately absent, which
+is the whole change: a transient error no longer buries a video.
+
+Retries are bounded AND they happen. A cap that works by never retrying is not
+a cap, which is what the previous baseline had -- `attempts` was written and
+never read.
+
+INVARIANT -- do not change: the store is authoritative and keys on URL only. It
+must never consult the vault to decide what is processed. If it did, deleting a
+note would silently re-download and re-summarise it. The isolation test
+("delete a note, re-run, it must not reappear") holds that line.
 """
 
 from __future__ import annotations
@@ -42,6 +41,12 @@ class State(StrEnum):
     PENDING = "pending"
     DONE = "done"
     FAILED = "failed"
+    RETRYABLE = "retryable"
+
+
+# Attempts before a retryable failure is written off. Counted across runs, not
+# within one: under next-run-only retrying, three attempts is three runs.
+MAX_ATTEMPTS = 3
 
 
 SCHEMA = """
@@ -149,14 +154,29 @@ class Store:
     def mark_failed(self, url: str, error: str, terminal: bool = True) -> None:
         """Record a failure.
 
-        NOTE: `terminal` is accepted and then ignored — every failure is
-        written as FAILED, which `processed_urls()` treats as final. The
-        parameter exists so a real taxonomy has something to call.
+        A terminal failure is final immediately. A retryable one returns to the
+        queue until it has been attempted `MAX_ATTEMPTS` times, after which it
+        becomes terminal — otherwise a permanently broken video would be
+        retried on every run forever.
+
+        The attempt is counted whatever the cause, including a batch-wide one
+        such as a rate limit. That is deliberate: it is what bounds the retry.
+        The cost is that a run which is rate-limited throughout spends one
+        attempt on every video in it, so the write-off is surfaced by state in
+        `stats()` rather than left to be discovered.
         """
+        state = State.FAILED
+        if not terminal:
+            row = self.conn.execute(
+                "SELECT attempts FROM videos WHERE url=?", (url,)
+            ).fetchone()
+            attempted = (row["attempts"] if row else 0) + 1
+            state = State.FAILED if attempted >= MAX_ATTEMPTS else State.RETRYABLE
+
         self.conn.execute(
             "UPDATE videos SET state=?, error=?, last_attempt=?, "
             "attempts=attempts+1 WHERE url=?",
-            (State.FAILED, error[:500], _now(), url),
+            (state, error[:500], _now(), url),
         )
         self.conn.commit()
 
@@ -178,9 +198,14 @@ class Store:
         return out
 
     def failures(self) -> list[sqlite3.Row]:
+        """Every video that failed, written off or still waiting to retry.
+
+        RETRYABLE rows are included because a queue you cannot see is the
+        problem this decision exists to fix. `state` distinguishes them.
+        """
         cur = self.conn.execute(
-            "SELECT url, platform, error, attempts, last_attempt FROM videos "
-            "WHERE state=? ORDER BY last_attempt DESC",
-            (State.FAILED,),
+            "SELECT url, platform, state, error, attempts, last_attempt FROM videos "
+            "WHERE state IN (?, ?) ORDER BY last_attempt DESC",
+            (State.FAILED, State.RETRYABLE),
         )
         return list(cur)

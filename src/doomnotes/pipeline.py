@@ -71,6 +71,8 @@ class RunResult:
     notes_written: int = 0
     caption_only: int = 0
     failed: int = 0
+    # Of `failed`, the ones the store will offer again next run.
+    retryable: int = 0
     stopped: bool = False
     stop_reason: str | None = None
     per_stage_failures: dict[str, int] = field(default_factory=dict)
@@ -84,6 +86,7 @@ class RunResult:
             f"  notes written    : {self.notes_written}",
             f"    of which caption-only: {self.caption_only}",
             f"  failed           : {self.failed}",
+            f"    of which retryable: {self.retryable}",
         ]
         for stage, n in sorted(self.per_stage_failures.items()):
             lines.append(f"      {stage:<12} {n}")
@@ -107,7 +110,7 @@ def process_one(
     """Run one ref through every stage.
 
     Returns (status, detail, note_path) where status is one of:
-    "written", "caption_only", "failed", "stop".
+    "written", "caption_only", "retry", "failed", "stop".
     """
     # -- download ---------------------------------------------------------
     result = deps.downloader(ref, audio_dir, auth)
@@ -130,7 +133,10 @@ def process_one(
         # hand. Instagram's export carries it; TikTok's does not, and neither do
         # manual or Playwright refs — their caption arrives with the media.
         if not ref.has_export_caption:
-            return "failed", f"download:{result.error}", None
+            # A retryable cause returns to the queue next run; a terminal one is
+            # written off now. The store enforces the attempt cap.
+            status = "retry" if result.outcome is Outcome.RETRYABLE else "failed"
+            return status, f"download:{result.reason}: {result.error}", None
 
     # -- summarize --------------------------------------------------------
     try:
@@ -237,11 +243,13 @@ def run(
             log.error("STOP: %s — halting run, not retrying. %s", ref.url, detail)
             break
 
-        if status == "failed":
+        if status in ("failed", "retry"):
             out.failed += 1
+            if status == "retry":
+                out.retryable += 1
             stage = (detail or "unknown:").split(":", 1)[0]
             out.per_stage_failures[stage] = out.per_stage_failures.get(stage, 0) + 1
-            store.mark_failed(ref.url, detail or "unknown")
+            store.mark_failed(ref.url, detail or "unknown", terminal=status == "failed")
         else:
             out.notes_written += 1
             if status == "caption_only":

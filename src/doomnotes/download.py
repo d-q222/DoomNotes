@@ -33,6 +33,8 @@ class DownloadResult:
     outcome: Outcome
     media: Media | None = None
     error: str | None = None
+    # Descriptive tag for a non-OK outcome: "deleted", "rate_limited", ...
+    reason: str | None = None
 
 
 @dataclass
@@ -63,54 +65,92 @@ def subprocess_runner(cmd: list[str], timeout: int) -> RunnerResult:
 # Calling a terminal failure retryable only costs a wasted request.
 # ──────────────────────────────────────────────────────────────────────────
 
+# (marker, reason). The reason is the descriptive tag recorded in the store and
+# the run journal, so a failure reads as "deleted" or "rate_limited" rather than
+# as a bucket name. Match order within a table is the order listed.
+
 # Halt the whole run. A challenge is escalated by retrying it, and a dead
 # session turns the rest of the batch into identical 401s that land in the
 # store as though the videos were the problem.
-STOP_MARKERS = (
-    "checkpoint",
-    "challenge_required",
-    "captcha",
-    "login_required",
-    "rate-limit reached",
-    "/accounts/login",
+STOP_REASONS = (
+    ("checkpoint", "checkpoint"),
+    ("challenge_required", "challenge_required"),
+    ("captcha", "captcha"),
+    ("login_required", "session_dead"),
+    ("rate-limit reached", "rate_limit_hard"),
+    ("/accounts/login", "login_redirect"),
 )
 
 # The video is gone or was never fetchable. Retrying spends requests against a
 # rate limit that matters and cannot succeed.
-TERMINAL_MARKERS = (
-    "video unavailable",
-    "this post is private",
-    "content isn't available",
-    "unsupported url",
-    "http error 404",
-    "http error 410",
+TERMINAL_REASONS = (
+    ("video unavailable", "deleted"),
+    ("this post is private", "private"),
+    ("content isn't available", "unavailable_here"),
+    ("unsupported url", "unsupported_url"),
+    ("http error 404", "not_found"),
+    ("http error 410", "gone"),
 )
 
+# Named retryable causes. Anything unmatched is retryable too, as "unknown" --
+# these exist to describe the failure, not to decide it.
+RETRYABLE_REASONS = (
+    ("http error 429", "rate_limited"),
+    ("http error 5", "server_error"),
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("name resolution", "dns"),
+    ("nodename nor servname", "dns"),
+    # Generic, so it comes last: "unable to download webpage: <urlopen error
+    # timed out>" contains both this and the timeout marker, and "timeout" is
+    # the more useful diagnosis.
+    ("unable to download webpage", "fetch_failed"),
+)
+
+# Kept as flat tuples: several callers and tests ask "is this a stop marker?"
+STOP_MARKERS = tuple(marker for marker, _ in STOP_REASONS)
+TERMINAL_MARKERS = tuple(marker for marker, _ in TERMINAL_REASONS)
 
 
 
-def classify(returncode: int, stderr: str) -> Outcome:
-    """Map a yt-dlp exit to an outcome.
+
+def _match(stderr: str) -> tuple[Outcome, str]:
+    """Outcome and descriptive reason from one pass, so they cannot disagree.
 
     Order is load-bearing. STOP is checked first because a dead session's
     message also contains wording that reads as terminal, and halting is always
     the safer reading. TERMINAL is checked before the retryable default so an
-    explicit 404 is not retried by the fallback.
+    explicit 404 is not swept up by the fallback.
     """
+    lowered = stderr.lower()
+    for table, outcome in (
+        (STOP_REASONS, Outcome.STOP),
+        (TERMINAL_REASONS, Outcome.TERMINAL),
+        (RETRYABLE_REASONS, Outcome.RETRYABLE),
+    ):
+        for marker, reason in table:
+            if marker in lowered:
+                return outcome, reason
+    # Everything else is retryable, including errors not seen before. The cost
+    # is asymmetric: a TikTok export ships no caption, so calling a transient
+    # failure terminal loses that video permanently with nothing to fall back
+    # on, while calling a terminal failure retryable costs one wasted request.
+    return Outcome.RETRYABLE, "unknown"
+
+
+def classify(returncode: int, stderr: str) -> Outcome:
+    """Map a yt-dlp exit to an outcome. See `_match` for the ordering rule."""
     if returncode == 0:
         return Outcome.OK
+    return _match(stderr)[0]
 
-    lowered = stderr.lower()
 
-    if any(marker in lowered for marker in STOP_MARKERS):
-        return Outcome.STOP
+def failure_reason(stderr: str) -> str:
+    """The descriptive tag for a failure, e.g. "deleted", "rate_limited".
 
-    if any(marker in lowered for marker in TERMINAL_MARKERS):
-        return Outcome.TERMINAL
-
-    # Everything else is retryable, including errors not seen before. See the
-    # asymmetry note above: this default is the one that cannot lose a video.
-    return Outcome.RETRYABLE
+    Always agrees with `classify` because both read the same tables.
+    """
+    return _match(stderr)[1]
 
 
 # ── DELIBERATELY NAIVE: pacing ───────────────────────────────────────────
@@ -248,26 +288,40 @@ def download(
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     if shutil.which("yt-dlp") is None and runner is subprocess_runner:
-        return DownloadResult(ref, Outcome.STOP, error="yt-dlp not installed")
+        return DownloadResult(
+            ref, Outcome.STOP, error="yt-dlp not installed", reason="yt_dlp_missing"
+        )
 
     cmd = build_command(ref, audio_dir, auth, audio_format)
     try:
         result = runner(cmd, timeout_s)
     except subprocess.TimeoutExpired:
-        return DownloadResult(ref, Outcome.RETRYABLE, error=f"timeout after {timeout_s}s")
+        return DownloadResult(
+            ref, Outcome.RETRYABLE, error=f"timeout after {timeout_s}s", reason="timeout"
+        )
     except Exception as exc:  # noqa: BLE001 - a source must never crash the run
-        return DownloadResult(ref, Outcome.RETRYABLE, error=f"{type(exc).__name__}: {exc}")
+        return DownloadResult(
+            ref, Outcome.RETRYABLE, error=f"{type(exc).__name__}: {exc}", reason="runner_error"
+        )
 
     outcome = classify(result.returncode, result.stderr)
     if outcome is not Outcome.OK:
         tail = (result.stderr or "").strip().splitlines()
-        return DownloadResult(ref, outcome, error=tail[-1] if tail else "unknown error")
+        return DownloadResult(
+            ref,
+            outcome,
+            error=tail[-1] if tail else "unknown error",
+            reason=failure_reason(result.stderr or ""),
+        )
 
     meta = _parse_metadata(result.stdout)
     audio_path = _locate_audio(meta, audio_dir, audio_format)
     if audio_path is None:
         return DownloadResult(
-            ref, Outcome.RETRYABLE, error="yt-dlp reported success but no audio file found"
+            ref,
+            Outcome.RETRYABLE,
+            error="yt-dlp reported success but no audio file found",
+            reason="no_audio_file",
         )
 
     return DownloadResult(
