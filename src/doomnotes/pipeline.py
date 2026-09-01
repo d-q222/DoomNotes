@@ -61,6 +61,15 @@ from doomnotes.vault import VaultGuardError, VaultWriter
 
 log = logging.getLogger(__name__)
 
+# How many videos in one run must fail on auth before the run is treated as
+# having a credentials problem rather than a video problem.
+#
+# Two, because the distinction only needs one corroborating case: a single 401
+# among successes is a property of that video, and the second identical failure
+# is the first evidence that it is not. Setting it higher would spend real
+# attempts on a dead session, which is the thing being avoided.
+AUTH_SYSTEMIC_THRESHOLD = 2
+
 
 @dataclass
 class Deps:
@@ -167,12 +176,19 @@ def process_one(
         # trade the real transcript for a degraded note the video may not need.
         # The caption is still there on the last attempt, so nothing is lost by
         # waiting — only by settling early.
-        # Checked BEFORE last_chance on purpose. An auth failure must not be
-        # what spends a video's final attempt, and must not be what forces the
-        # degraded caption-only note — the credentials get fixed and the video
-        # is tried properly, rather than being written off for someone else's
-        # problem.
-        if result.outcome is Outcome.RETRYABLE and is_auth_failure(result.reason):
+        # An auth failure is usually not about this video, so it is held rather
+        # than charged — but NOT on the final attempt. An exemption that also
+        # applied there would make queue residency unbounded: a video that only
+        # ever fails on auth could never resolve, never take the caption-only
+        # escape hatch, and would occupy a batch slot on every future run.
+        #
+        # Whether it is charged is decided at the END of the run, once it is
+        # known how many other videos failed the same way. See the flush below.
+        if (
+            result.outcome is Outcome.RETRYABLE
+            and is_auth_failure(result.reason)
+            and not last_chance
+        ):
             return "blocked", f"download:{result.reason}: {result.error}", None
 
         if result.outcome is Outcome.RETRYABLE and not last_chance:
@@ -232,6 +248,15 @@ def run(
     # Seeded from the vault, not empty: runs are separate processes days apart,
     # so an in-memory set cannot see notes an earlier run wrote. See SlugIndex.
     taken = SlugIndex.from_vault(writer.root, subdirs=(transcripts_dir,))
+
+    # Blocked videos, held until the batch ends. Whether an auth failure costs
+    # an attempt depends on how many OTHER videos failed the same way, and that
+    # is not known while the video is being processed.
+    #
+    # Deferring is safe in the direction that matters: if the process dies
+    # mid-run, these rows are simply not updated, so the videos keep their
+    # previous state and are offered again. Nothing is written off by a crash.
+    blocked_pending: list[tuple[str, str]] = []
 
     store.register(refs)
     batch = store.queue(list(refs), limit)
@@ -294,16 +319,16 @@ def run(
             out.failed += 1
             if status == "retry":
                 out.retryable += 1
-            if status == "blocked":
-                out.blocked += 1
             stage = (detail or "unknown:").split(":", 1)[0]
             out.per_stage_failures[stage] = out.per_stage_failures.get(stage, 0) + 1
-            store.mark_failed(
-                ref.url,
-                detail or "unknown",
-                terminal=status == "failed",
-                counts_as_attempt=status != "blocked",
-            )
+            if status == "blocked":
+                blocked_pending.append((ref.url, detail or "unknown"))
+            else:
+                store.mark_failed(
+                    ref.url,
+                    detail or "unknown",
+                    terminal=status == "failed",
+                )
         else:
             out.notes_written += 1
             if status == "caption_only":
@@ -319,6 +344,32 @@ def run(
             # as the spacing a run actually produced.
             jrn.write("slept", seconds=round(slept, 3))
             time.sleep(slept)
+
+    # ── flush the held auth failures ──────────────────────────────────────
+    # "This is a credentials problem" is now a measurement rather than an
+    # assumption. Several videos failing the same way is evidence about the
+    # session; one video failing while others succeed is evidence about that
+    # video, and charging it is what stops a permanently-401 item from sitting
+    # in the queue forever, never resolving and never taking the caption-only
+    # escape hatch.
+    if blocked_pending:
+        systemic = len(blocked_pending) >= AUTH_SYSTEMIC_THRESHOLD
+        for url, detail in blocked_pending:
+            store.mark_failed(
+                url, detail, terminal=False, counts_as_attempt=not systemic
+            )
+        if systemic:
+            out.blocked = len(blocked_pending)
+        else:
+            # It behaved as an ordinary retryable failure, so it is reported as
+            # one. Calling it "blocked" would point at credentials that are fine.
+            out.retryable += len(blocked_pending)
+        jrn.write(
+            "auth_failures_resolved",
+            count=len(blocked_pending),
+            systemic=systemic,
+            charged=not systemic,
+        )
 
     jrn.write(
         "run_finished",

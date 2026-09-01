@@ -150,7 +150,7 @@ deliberately **retryable**: each is a property of one video as often as of the s
 retrying one costs three requests while halting on one costs the rest of the queue. `403` is
 retryable for the same reason — geo-blocking and auth are indistinguishable from the message.
 
-**An auth failure costs the video nothing.** A dead session that never emits `login_required` —
+**An auth failure costs the video nothing — when it looks like the session's fault.** A dead session that never emits `login_required` —
 only prose, or a bare 401 — is retryable like anything else, but it is named (`unauthorized`,
 `auth_required`) and recorded with `counts_as_attempt=False`. The request failed on a
 precondition, so the video was never really tried, and a video that was never tried must not be
@@ -160,6 +160,21 @@ and gets fixed there, not by exhausting the queue.
 Deliberately excluded from that exemption: `429` and `5xx`, which are real contact with the
 platform and exactly what the cap exists to bound; and `403`, which is geo-blocking as often as
 auth — exempting it would let a permanently region-locked video be retried on every run forever.
+
+**"The session's fault" is measured, not assumed**, because a bare 401 is exactly as ambiguous
+as a 403. The exemption applies only when at least `AUTH_SYSTEMIC_THRESHOLD` videos in the same
+run failed on auth: one 401 among successes is evidence about that video, and the second
+identical failure is the first evidence that it is not. A lone auth failure is therefore charged
+like any other retryable failure, which is what stops a permanently-401 reel from sitting in the
+queue forever, never resolving and never taking the caption-only escape hatch.
+
+The decision is made at the end of the batch, once the count is known, so the store write is
+held until then. Holding fails in the safe direction: a run that dies mid-batch simply leaves
+those rows untouched, and the videos are offered again.
+
+The exemption also does not apply on a video's **final** attempt. One that did would leave a
+video which only ever fails on auth unable to resolve at all; on the last attempt it is settled
+instead, and Instagram takes the caption it already has.
 
 **What remains open.** Nothing escalates on its own. An auth-blocked video sits in the queue
 indefinitely and no counter crosses a threshold, so the run summary saying `auth-blocked: N —
