@@ -233,27 +233,31 @@ def test_reason_and_outcome_cannot_disagree(stderr: str, expected: Outcome, note
 
 
 @pytest.mark.parametrize(
-    "stderr,reason",
+    "stderr",
     [
-        ("ERROR: unable to download webpage: HTTP Error 401: Unauthorized", "unauthorized"),
-        ("ERROR: [Instagram] Login required to access this content", "session_dead"),
-        ("ERROR: [Instagram] redirected to /consent/", "consent_redirect"),
+        "ERROR: unable to download webpage: HTTP Error 401: Unauthorized",
+        "ERROR: unable to download webpage: HTTP Error 403: Forbidden",
+        "ERROR: [Instagram] Login required to access this content",
+        "ERROR: [Instagram] redirected to /consent/",
     ],
 )
-def test_an_auth_failure_halts_rather_than_being_retried(stderr: str, reason: str) -> None:
-    """A dead session is not a property of the video.
+def test_an_ambiguous_auth_error_is_retryable_not_a_halt(stderr: str) -> None:
+    """These look like a dead session and are just as often one bad video.
 
-    Retried instead of halted, it spends the whole batch on identical 401s and
-    files each one in the store as though the video were the problem. Only the
-    `login_required` token form was matched, so the prose form, the bare HTTP
-    status and a consent redirect all fell through to RETRYABLE.
+    STOP is not a per-video outcome: `pipeline.run` breaks without marking the
+    video, so it stays PENDING and is offered first next run. Classifying a
+    per-video 401 or a one-off consent interstitial as STOP wedges the queue
+    forever — every run halts on the same video and nothing behind it is ever
+    attempted. On TikTok that loses the whole remaining backlog, not one video.
+
+    Retrying costs three requests. Halting costs everything after it.
     """
-    assert classify(1, stderr) is Outcome.STOP
-    assert failure_reason(stderr) == reason
-
-
-def test_an_ambiguous_403_stays_retryable() -> None:
-    """403 is geo-blocking as often as it is auth, and the default is the one
-    that cannot lose a video. Pinned so widening STOP stays deliberate."""
-    stderr = "ERROR: unable to download webpage: HTTP Error 403: Forbidden"
     assert classify(1, stderr) is Outcome.RETRYABLE
+
+
+def test_an_unambiguous_dead_session_still_halts() -> None:
+    """The token form is yt-dlp's own error code, not prose that may describe
+    one video. That distinction is the whole reason the list stayed narrow."""
+    stderr = "ERROR: [Instagram] Requested content is not available, login_required"
+    assert classify(1, stderr) is Outcome.STOP
+    assert failure_reason(stderr) == "session_dead"

@@ -77,16 +77,29 @@ STOP_REASONS = (
     ("challenge_required", "challenge_required"),
     ("captcha", "captcha"),
     ("login_required", "session_dead"),
-    # The prose form, and the HTTP status behind it. Without these a dead
-    # session is retried, and the rest of the batch becomes identical 401s that
-    # land in the store as though the videos were the problem.
-    ("login required", "session_dead"),
-    ("http error 401", "unauthorized"),
     ("rate-limit reached", "rate_limit_hard"),
-    # "on any captcha, checkpoint or unexpected redirect: halt and report."
     ("/accounts/login", "login_redirect"),
-    ("/consent", "consent_redirect"),
 )
+
+# Deliberately NOT here: bare "http error 401", the prose "login required", and
+# "/consent".
+#
+# STOP is not a per-video outcome. `pipeline.run` breaks without calling
+# mark_failed, so the triggering URL stays PENDING and is offered FIRST on the
+# next run. A per-video condition misclassified as STOP therefore wedges the
+# queue permanently: every future run halts on the same video and nothing after
+# it is ever attempted. On TikTok, with no caption to salvage, that loses the
+# entire remaining backlog rather than one video.
+#
+# All three of those are per-video as often as they are session-wide. A single
+# private or geo-restricted video can return 401; one consent interstitial can
+# appear for one fetch. That is the same ambiguity for which 403 is deliberately
+# left RETRYABLE, and it deserves the same answer.
+#
+# A genuinely dead session shows up as REPEATED failures across videos, not as
+# one error string. Detecting that is decision 7.1 (systemic outage vs item
+# failure), which has its own xfail. The classifier cannot see across videos and
+# should not pretend to.
 
 # The video is gone or was never fetchable. Retrying spends requests against a
 # rate limit that matters and cannot succeed.
