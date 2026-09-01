@@ -16,8 +16,8 @@ import pytest
 from doomnotes.models import VideoRef
 from doomnotes.store import State, Store
 
-A = VideoRef("https://www.instagram.com/reel/AAA/", "instagram", caption="a", source_order=0)
-B = VideoRef("https://www.instagram.com/reel/BBB/", "instagram", caption="b", source_order=1)
+A = VideoRef("https://www.instagram.com/reel/AAA/", "instagram", caption_source="export", caption="a", source_order=0)
+B = VideoRef("https://www.instagram.com/reel/BBB/", "instagram", caption_source="export", caption="b", source_order=1)
 C = VideoRef("https://www.tiktokv.com/share/video/111/", "tiktok", source_order=0)
 
 

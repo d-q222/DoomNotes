@@ -253,6 +253,9 @@ def parse(
             VideoRef(
                 url=curl,
                 platform="instagram",
+                # The export ships the caption, which is what makes a
+                # caption-only note possible when the download fails.
+                caption_source="export",
                 caption=caption,
                 author=f"@{author}" if author and not author.startswith("@") else author,
                 source_order=len(refs),

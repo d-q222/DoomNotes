@@ -1,26 +1,13 @@
 """Core data shapes that flow between pipeline stages.
 
-    # ── DELIBERATELY PERMISSIVE: VideoRef field optionality ─────────────────
-    # CURRENT: every source-specific field is Optional; only `url` and
-    #   `platform` are required.
-    #
-    # WHY THAT IS INSUFFICIENT: "everything is optional" pushes the problem
-    #   downstream. Each consumer must re-derive which field combinations are
-    #   actually possible, and nothing prevents a source emitting a ref no
-    #   later stage can use. The type asserts nothing true about the data.
-    #
-    #   The real shape is that the two sources have OPPOSITE gaps:
-    #     Instagram : caption ✓  author ✓  saved_at ✗  source_order ✓
-    #     TikTok    : caption ✗  author ✗  saved_at ✓  source_order ✓
-    #   That asymmetry is load-bearing — it is why a failed TikTok download is
-    #   unrecoverable while a failed Instagram one still yields a caption-only
-    #   note. The type does not currently encode it.
-    #
-    # INTENDED: either one permissive struct validated at the seam, or distinct
-    #   types a consumer must narrow. A browser-scraper source would fail like
-    #   TikTok rather than like the Instagram export, since its caption arrives
-    #   with the media.
-    # ────────────────────────────────────────────────────────────────────────
+`VideoRef.caption_source` records where a ref's caption comes from. It is
+declared by the adapter that built the ref, never inferred from `platform`,
+because salvageability is not a platform property: an Instagram *export* ref
+carries its caption, while a manual-list ref for the same platform does not —
+its caption arrives with the media, exactly as TikTok's does.
+
+That declaration is what `has_export_caption` reads, and it is the rule
+deciding whether a failed download still yields a note.
 """
 
 from __future__ import annotations
@@ -31,6 +18,11 @@ from pathlib import Path
 from typing import Literal
 
 Platform = Literal["instagram", "tiktok"]
+
+# Where a ref's caption comes from. "export" means the export file carries it,
+# so it is in hand before any download. "media" means it arrives with the
+# download itself, so a failed download leaves nothing to salvage.
+CaptionSource = Literal["export", "media"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +36,11 @@ class VideoRef:
     url: str
     platform: Platform
 
+    # Declared by the source adapter. The default is the conservative case; a
+    # source that carries captions and forgets to say so cannot pass silently,
+    # because __post_init__ rejects a "media" ref that has one.
+    caption_source: CaptionSource = "media"
+
     # Instagram export only: the caption ships in the export itself, which is
     # what makes a caption-only fallback note possible when the download fails.
     caption: str | None = None
@@ -56,15 +53,29 @@ class VideoRef:
     # exports; it is Instagram's *only* recency signal.
     source_order: int | None = None
 
+    def __post_init__(self) -> None:
+        """Reject the one combination no source can produce.
+
+        A caption that arrives with the media cannot be present before the
+        download. This lives on the model rather than in an adapter so it holds
+        for every construction path — tests and future sources included.
+        """
+        if self.caption_source == "media" and (self.caption or "").strip():
+            raise ValueError(
+                f"caption_source='media' but a caption is already present: {self.url}. "
+                "Declare caption_source='export' if this source carries captions."
+            )
+
     @property
     def has_export_caption(self) -> bool:
         """Whether a failed download can still produce a note.
 
-        True only for Instagram export refs. TikTok, manual-list and scraper
-        refs get their caption from yt-dlp metadata — the same call that fetches
-        the media — so if the download fails there is nothing left.
+        Needs both halves: a source that carries captions, and a non-empty one
+        here. `caption_source` is what separates an export ref whose caption is
+        genuinely empty from a ref whose caption was never going to be present
+        — indistinguishable from the caption field alone.
         """
-        return bool(self.caption and self.caption.strip())
+        return self.caption_source == "export" and bool(self.caption and self.caption.strip())
 
 
 @dataclass(frozen=True, slots=True)

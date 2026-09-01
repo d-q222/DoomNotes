@@ -37,6 +37,7 @@ from doomnotes.vault import VaultWriter
 IG = VideoRef(
     "https://www.instagram.com/reel/AAAAAAAAAAA/",
     "instagram",
+    caption_source="export",
     caption="a caption from the export",
     source_order=0,
 )

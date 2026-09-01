@@ -341,13 +341,15 @@ def cmd_check_auth(args, cfg) -> int:
         (
             "instagram",
             "https://www.instagram.com/reel/<SHORTCODE>/",
-            "<SHORTCODE> — copy one from `doomnotes parse`",
+            "<SHORTCODE> — grep a reel URL out of the saved-posts export "
+            f"({ig_export.EXPORT_GLOB}). `doomnotes parse` reports counts, "
+            "not URLs",
         ),
         (
             "tiktok",
             "https://www.tiktok.com/@_/video/<ID>",
-            "<ID> — the digits from a tiktokv.com/share/video/<ID>/ link. "
-            "Not a typo, see below",
+            "<ID> — the digits from a share/video/<ID>/ link in "
+            f"{tiktok_export.DEFAULT_EXPORT.name}. Not a typo, see below",
         ),
     ):
         auth = cfg.get("auth", platform, default={}) or {}

@@ -27,7 +27,7 @@ from doomnotes.download import (
 )
 from doomnotes.models import VideoRef
 
-IG = VideoRef("https://www.instagram.com/reel/AAA/", "instagram", caption="c")
+IG = VideoRef("https://www.instagram.com/reel/AAA/", "instagram", caption_source="export", caption="c")
 TT = VideoRef("https://www.tiktokv.com/share/video/111/", "tiktok")
 
 # (stderr, expected_outcome, note)

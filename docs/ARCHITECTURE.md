@@ -16,10 +16,15 @@ browser-driven scraper for the recent delta). The test of whether the seam is in
 place is whether adding it requires editing `pipeline.py`. If it does, the protocol was drawn
 wrong.
 
-**Why both `caption` and `saved_at` are optional:** the two exports have opposite gaps.
-Instagram ships captions and authors but no dates; TikTok ships exact save timestamps and
-nothing else. Neither field can be required, and `has_export_caption` is where that asymmetry
-becomes a decision the pipeline can act on.
+**Why both `caption` and `saved_at` are optional, and why optional is not enough:** the two
+exports have opposite gaps. Instagram ships captions and authors but no dates; TikTok ships
+exact save timestamps and nothing else, so neither field can be required. But optionality
+alone does not say *why* a field is absent, and salvageability is not a property of the
+platform: a manual-list Instagram ref has no caption either, because its caption arrives with
+the media. So each adapter declares `caption_source` (`"export"` or `"media"`) when it builds
+a ref, and `has_export_caption` reads that declaration instead of inferring from `platform`.
+`VideoRef.__post_init__` rejects a `"media"` ref that already carries a caption, so the
+combination no source can produce cannot be constructed at all.
 
 **Why ordering is per-source and never merged:** Instagram has no save timestamps at all, so
 there is no shared key on which to interleave the two queues. Each source drains as its own
