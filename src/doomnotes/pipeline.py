@@ -61,13 +61,18 @@ from doomnotes.vault import VaultGuardError, VaultWriter
 
 log = logging.getLogger(__name__)
 
-# How many videos in one run must fail on auth before the run is treated as
-# having a credentials problem rather than a video problem.
+# How many videos of ONE platform must fail on auth, with nothing of that
+# platform succeeding, before the run is treated as having a credentials problem
+# rather than a video problem.
 #
-# Two, because the distinction only needs one corroborating case: a single 401
-# among successes is a property of that video, and the second identical failure
-# is the first evidence that it is not. Setting it higher would spend real
-# attempts on a dead session, which is the thing being avoided.
+# Two, because the distinction needs one corroborating case: a single 401 is a
+# property of that video, and a second identical failure is the first evidence
+# that it is not. Setting it higher would spend real attempts on a dead session.
+#
+# Counted per platform because credentials are per platform — `[auth.instagram]`
+# and `[auth.tiktok]` have separate modes and separate cookie files. One
+# Instagram 401 and one TikTok 401 are two unrelated facts, and letting them
+# corroborate each other would exempt both on evidence that does not exist.
 AUTH_SYSTEMIC_THRESHOLD = 2
 
 
@@ -256,7 +261,10 @@ def run(
     # Deferring is safe in the direction that matters: if the process dies
     # mid-run, these rows are simply not updated, so the videos keep their
     # previous state and are offered again. Nothing is written off by a crash.
-    blocked_pending: list[tuple[str, str]] = []
+    blocked_pending: list[tuple[str, str, str]] = []
+    # Videos attempted per platform, so "nothing of this platform got through"
+    # is answerable at the flush.
+    attempted_by_platform: dict[str, int] = {}
 
     store.register(refs)
     batch = store.queue(list(refs), limit)
@@ -264,6 +272,7 @@ def run(
 
     for i, ref in enumerate(batch):
         out.attempted += 1
+        attempted_by_platform[ref.platform] = attempted_by_platform.get(ref.platform, 0) + 1
         started = time.monotonic()
 
         # ── Naive isolation: one boundary, per video. See the note above.
@@ -322,7 +331,7 @@ def run(
             stage = (detail or "unknown:").split(":", 1)[0]
             out.per_stage_failures[stage] = out.per_stage_failures.get(stage, 0) + 1
             if status == "blocked":
-                blocked_pending.append((ref.url, detail or "unknown"))
+                blocked_pending.append((ref.url, detail or "unknown", ref.platform))
             else:
                 store.mark_failed(
                     ref.url,
@@ -353,23 +362,37 @@ def run(
     # in the queue forever, never resolving and never taking the caption-only
     # escape hatch.
     if blocked_pending:
-        systemic = len(blocked_pending) >= AUTH_SYSTEMIC_THRESHOLD
-        for url, detail in blocked_pending:
-            store.mark_failed(
-                url, detail, terminal=False, counts_as_attempt=not systemic
+        by_platform: dict[str, list[tuple[str, str]]] = {}
+        for url, detail, platform in blocked_pending:
+            by_platform.setdefault(platform, []).append((url, detail))
+
+        for platform, held in by_platform.items():
+            # Both halves are required, and the second is the one that bounds
+            # this. Enough failures to corroborate each other is not evidence of
+            # a credentials problem while other videos on the same credentials
+            # are succeeding — that combination says the failures belong to
+            # those videos, and charging them is what makes them terminate.
+            others_succeeded = attempted_by_platform.get(platform, 0) > len(held)
+            systemic = len(held) >= AUTH_SYSTEMIC_THRESHOLD and not others_succeeded
+
+            for url, detail in held:
+                store.mark_failed(
+                    url, detail, terminal=False, counts_as_attempt=not systemic
+                )
+            if systemic:
+                out.blocked += len(held)
+            else:
+                # It behaved as an ordinary retryable failure, so it is reported
+                # as one. Calling it "blocked" would point at working credentials.
+                out.retryable += len(held)
+            jrn.write(
+                "auth_failures_resolved",
+                platform=platform,
+                count=len(held),
+                platform_attempted=attempted_by_platform.get(platform, 0),
+                systemic=systemic,
+                charged=not systemic,
             )
-        if systemic:
-            out.blocked = len(blocked_pending)
-        else:
-            # It behaved as an ordinary retryable failure, so it is reported as
-            # one. Calling it "blocked" would point at credentials that are fine.
-            out.retryable += len(blocked_pending)
-        jrn.write(
-            "auth_failures_resolved",
-            count=len(blocked_pending),
-            systemic=systemic,
-            charged=not systemic,
-        )
 
     jrn.write(
         "run_finished",

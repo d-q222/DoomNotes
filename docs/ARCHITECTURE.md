@@ -162,11 +162,24 @@ platform and exactly what the cap exists to bound; and `403`, which is geo-block
 auth — exempting it would let a permanently region-locked video be retried on every run forever.
 
 **"The session's fault" is measured, not assumed**, because a bare 401 is exactly as ambiguous
-as a 403. The exemption applies only when at least `AUTH_SYSTEMIC_THRESHOLD` videos in the same
-run failed on auth: one 401 among successes is evidence about that video, and the second
-identical failure is the first evidence that it is not. A lone auth failure is therefore charged
-like any other retryable failure, which is what stops a permanently-401 reel from sitting in the
-queue forever, never resolving and never taking the caption-only escape hatch.
+as a 403. Two conditions, both required, evaluated **per platform**:
+
+- at least `AUTH_SYSTEMIC_THRESHOLD` videos of that platform failed on auth in this run, and
+- nothing of that platform got through.
+
+The second is what bounds it. Corroboration alone is not evidence: two reels that permanently
+401 corroborate each other on every run forever, and exempting them on that basis would be the
+same unbounded residency the rule exists to prevent. A third video succeeding on the same
+cookies says the cookies work, so the failures belong to those videos and charging them is what
+makes them terminate.
+
+Per platform because credentials are per platform — `[auth.instagram]` and `[auth.tiktok]` have
+separate modes and separate cookie files. An Instagram 401 and a TikTok 401 are two unrelated
+facts, and letting them corroborate each other would exempt both on evidence that does not exist.
+
+The residual ambiguity is a batch in which every attempted video of a platform fails on auth and
+the credentials are in fact fine. From inside one run that is indistinguishable from a dead
+session, and there is no cross-run evidence to appeal to.
 
 The decision is made at the end of the batch, once the count is known, so the store write is
 held until then. Holding fails in the safe direction: a run that dies mid-batch simply leaves

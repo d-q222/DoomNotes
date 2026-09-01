@@ -998,3 +998,66 @@ def test_the_run_summary_names_a_session_problem(
     rendered = result.summary()
     assert "auth-blocked: 2" in rendered, rendered
     assert "cookies" in rendered
+
+
+def test_auth_failures_alongside_successes_are_still_charged(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Corroboration is not enough on its own — the successes are the tell.
+
+    Two reels that permanently 401 will corroborate each other on every run
+    forever. If that alone counted as a credentials problem they would never be
+    charged, never reach the cap, never take the caption-only hatch, and hold
+    two batch slots for good — the exact unbounded shape this bound exists to
+    remove. A third video succeeding on the same cookies says the cookies work.
+    """
+    bad_a = replace(TT, url="https://www.tiktokv.com/share/video/4444444444444444444/", source_order=0)
+    bad_b = replace(TT, url="https://www.tiktokv.com/share/video/5555555555555555555/", source_order=1)
+    good = replace(TT, url="https://www.tiktokv.com/share/video/6666666666666666666/", source_order=2)
+    bad = {bad_a.url, bad_b.url}
+
+    def downloader(ref, audio_dir, auth):
+        if ref.url in bad:
+            return downloader_fails(Outcome.RETRYABLE, AUTH_ERR)(ref, audio_dir, auth)
+        return downloader_ok()(ref, audio_dir, auth)
+
+    result = run(
+        [bad_a, bad_b, good],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0, "something got through on these credentials"
+    assert store.attempts_for(bad_a.url) == 1
+    assert store.attempts_for(bad_b.url) == 1
+
+
+def test_one_failure_on_each_platform_does_not_corroborate(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Credentials are per platform, so the evidence is too.
+
+    `[auth.instagram]` and `[auth.tiktok]` have separate modes and separate
+    cookie files. An Instagram 401 and a TikTok 401 are two unrelated facts;
+    letting them corroborate each other would exempt both on evidence that does
+    not exist, and neither would ever be charged.
+    """
+    result = run(
+        [IG, TT],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.RETRYABLE, AUTH_ERR)),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0, "one failure per platform is one failure each"
+    assert store.attempts_for(IG.url) == 1
+    assert store.attempts_for(TT.url) == 1
