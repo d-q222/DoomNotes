@@ -74,13 +74,24 @@ done
 THRESHOLD=5
 while IFS= read -r f; do
   [ -f "$f" ] || continue
-  # File-level pragma for files that are ALL synthetic fixtures. Must be a
-  # deliberate edit to the file itself, so it can't happen by accident.
-  if git show ":$f" 2>/dev/null | grep -q 'doomnotes:synthetic-urls'; then
-    warn "note     $f  — declared synthetic fixtures, bulk-URL check skipped"
-    continue
-  fi
-  n=$(git show ":$f" 2>/dev/null \
+  # Read the blob once, into a variable rather than through a pipe.
+  #
+  # `git show ":$f" | grep -q PRAGMA` was the obvious spelling and was wrong:
+  # grep -q exits at the first match, git show then dies of SIGPIPE writing the
+  # rest, and `set -o pipefail` (line 12) turns that into a non-zero status --
+  # so a *successful* match reported failure and the pragma was ignored. The
+  # pragma sits at the top of a file, so this only bites once the file exceeds
+  # the pipe buffer (16KB on macOS) and git show is still writing when grep
+  # leaves. It fails closed, blocking a legitimate commit rather than passing a
+  # secret, but it fails silently and it gets likelier as a file grows.
+  blob=$(git show ":$f" 2>/dev/null)
+  case "$blob" in
+    *doomnotes:synthetic-urls*)
+      warn "note     $f  — declared synthetic fixtures, bulk-URL check skipped"
+      continue
+      ;;
+  esac
+  n=$(printf '%s\n' "$blob" \
       | grep -oEa 'instagram\.com/(reel|reels|p|tv)/[A-Za-z0-9_-]{5,}|tiktokv?\.com/(share/)?video/[0-9]{6,}' \
       | sort -u | wc -l | tr -d ' ')
   if [ "${n:-0}" -gt "$THRESHOLD" ]; then
