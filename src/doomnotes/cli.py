@@ -132,8 +132,18 @@ def cmd_run(args, cfg) -> int:
         for line, why in dropped:
             print(f"  dropped {line}: {why}")
     else:
-        ig_refs, _ = ig_export.parse()
-        tt_refs, _ = tiktok_export.parse()
+        ig_refs, ig_rec = ig_export.parse()
+        tt_refs, tt_rec = tiktok_export.parse()
+        # A dropped row never becomes a ref, so it never reaches the store and
+        # cannot appear in `doomnotes status` — the one loss the pipeline cannot
+        # report on its own. `run --urls` already prints its drops; this is the
+        # same courtesy for the exports.
+        for source, rec in (("instagram", ig_rec), ("tiktok", tt_rec)):
+            if rec.dropped:
+                print(f"  {len(rec.dropped)} {source} rows dropped at parse "
+                      f"(not queued, not stored):")
+                for url, why in rec.dropped:
+                    print(f"    {why}: {url}")
         order = cfg.get("pacing", "queue_order", default=["instagram", "tiktok"])
         by_platform = {"instagram": ig_refs, "tiktok": tt_refs}
         refs = [r for p in order for r in by_platform.get(p, [])]

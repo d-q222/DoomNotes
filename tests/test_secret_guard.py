@@ -99,11 +99,14 @@ def test_the_synthetic_pragma_survives_a_large_file(repo: Path) -> None:
     git show dies of SIGPIPE, pipefail propagates it — so a successful match
     reported failure and the file was blocked.
     """
-    padding = "\n".join(f"# filler line {i} " + "x" * 60 for i in range(600))
+    # Must exceed the pipe buffer, and buffers differ by platform: 16KB on
+    # macOS, typically 64KB on Linux. Sized past both, so the test pins the bug
+    # everywhere rather than passing vacuously off the machine it was written on.
+    padding = "\n".join(f"# filler line {i} " + "x" * 60 for i in range(2400))
     stage(repo, "fixtures.py", f"# doomnotes:synthetic-urls\n{SHARE_FORM}\n{padding}\n")
 
     result = run_guard(repo)
-    assert len(SHARE_FORM) + len(padding) > 16384, "must exceed the pipe buffer to be a test"
+    assert len(SHARE_FORM) + len(padding) > 131072, "must exceed any common pipe buffer"
     assert result.returncode == 0, f"pragma was not honoured:\n{result.stdout}"
     assert "skipped" in result.stdout
 

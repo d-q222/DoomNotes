@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from doomnotes.download import DownloadResult, Outcome
+from doomnotes.download import DownloadResult, Outcome, failure_reason
 from doomnotes.journal import NullJournal, RunJournal, open_journal, read_runs
 from doomnotes.models import Note, VideoRef
 from doomnotes.pipeline import Deps, run
@@ -59,7 +59,8 @@ def a_note(ref: VideoRef, title: str = "A note about postgres indexes") -> Note:
 
 def deps(**over) -> Deps:
     base = dict(
-        downloader=lambda ref, d, a: DownloadResult(ref, Outcome.TERMINAL, error="Video unavailable"),
+        downloader=lambda ref, d, a: DownloadResult(ref, Outcome.TERMINAL, error="Video unavailable",
+                                                    reason=failure_reason("Video unavailable")),
         transcriber=lambda p: None,
         summarizer=lambda ref, tr, media, reg: a_note(ref),
     )
@@ -271,7 +272,8 @@ def test_a_stop_is_recorded_before_the_run_halts(vault: Path, tmp_path: Path) ->
     path = tmp_path / "runs.jsonl"
     stopper = deps(
         downloader=lambda ref, d, a: DownloadResult(
-            ref, Outcome.STOP, error="challenge_required: checkpoint"
+            ref, Outcome.STOP, error="challenge_required: checkpoint",
+            reason=failure_reason("challenge_required: checkpoint"),
         )
     )
     with RunJournal(path, run_id="r1") as journal:
@@ -280,7 +282,10 @@ def test_a_stop_is_recorded_before_the_run_halts(vault: Path, tmp_path: Path) ->
     records = read_runs(path)
     video = next(r for r in records if r["event"] == "video")
     assert video["status"] == "stop"
-    assert "checkpoint" in video["detail"]
+    # The tagged form, not just the raw error. Asserting the substring alone
+    # passed even when the reason was missing entirely, because the error text
+    # contains the same word.
+    assert video["detail"].startswith("download:checkpoint:"), video["detail"]
 
     # A halted run still finishes — it just finishes stopped, and says why.
     # Reserving "no run_finished record at all" for a process that was killed

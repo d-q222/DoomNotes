@@ -32,7 +32,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from doomnotes.download import DownloadResult, Outcome  # noqa: E402
+from doomnotes.download import DownloadResult, Outcome, failure_reason  # noqa: E402
 from doomnotes.journal import RunJournal, read_runs  # noqa: E402
 from doomnotes.models import Media, Note, VideoRef  # noqa: E402
 from doomnotes.pipeline import Deps, run as run_batch  # noqa: E402
@@ -65,7 +65,10 @@ def fake_downloader(ref: VideoRef, audio_dir: Path, auth: dict, **kw) -> Downloa
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     if ref.url in (DELETED_IG, DELETED_TT):
-        return DownloadResult(ref, Outcome.TERMINAL, error="Video unavailable")
+        return DownloadResult(
+            ref, Outcome.TERMINAL, error="Video unavailable",
+            reason=failure_reason("Video unavailable"),
+        )
 
     if ref.url == PHOTO_POST:
         # A photo post downloads but has no audio track.
@@ -113,7 +116,10 @@ def fake_summarizer(ref: VideoRef, transcript, media, registry) -> Note:
 
 
 def checkpoint_downloader(ref, audio_dir, auth, **kw) -> DownloadResult:
-    return DownloadResult(ref, Outcome.STOP, error="challenge_required: checkpoint")
+    return DownloadResult(
+        ref, Outcome.STOP, error="challenge_required: checkpoint",
+        reason=failure_reason("challenge_required: checkpoint"),
+    )
 
 
 def main() -> int:
