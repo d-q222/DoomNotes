@@ -812,3 +812,49 @@ def test_a_stop_reports_its_descriptive_reason(
     )
     assert result.stopped is True
     assert "session_dead" in (result.stop_reason or ""), result.stop_reason
+
+
+def test_the_whole_retry_lifecycle_across_consecutive_runs(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Four runs against one store, as days apart would look.
+
+    The unit tests each pin one moment. What actually matters is the sequence,
+    and it is the thing a reader has to trust: retries must be bounded AND must
+    happen, and the caption must be held back until there is nothing left to
+    wait for. An off-by-one anywhere shows up here as a fourth attempt or as a
+    note written on run 1.
+    """
+    err = "ERROR: unable to download webpage: HTTP Error 429: Too Many Requests"
+    d = deps(downloader=downloader_fails(Outcome.RETRYABLE, err))
+
+    seen = []
+    for _ in range(4):
+        result = run(
+            [IG, TT],
+            store=store,
+            writer=writer,
+            registry=TagRegistry(),
+            deps=d,
+            audio_dir=tmp_path / "audio",
+            auth_for=lambda p: {},
+            sleep_range=None,
+        )
+        seen.append((
+            result.attempted,
+            store.state_of(IG.url),
+            store.state_of(TT.url),
+            len(list(writer.root.glob("*.md"))),
+        ))
+
+    assert seen == [
+        (2, State.RETRYABLE, State.RETRYABLE, 0),
+        (2, State.RETRYABLE, State.RETRYABLE, 0),
+        # Last attempt: Instagram falls back to its caption, TikTok has nothing.
+        (2, State.DONE, State.FAILED, 1),
+        # Both are processed now, so the batch is empty. Bounded at three.
+        (0, State.DONE, State.FAILED, 1),
+    ], seen
+
+    assert store.attempts_for(IG.url) == MAX_ATTEMPTS
+    assert store.attempts_for(TT.url) == MAX_ATTEMPTS
