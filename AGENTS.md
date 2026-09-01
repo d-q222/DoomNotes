@@ -92,7 +92,7 @@ Several functions are intentionally simplistic, each marked with a `DELIBERATELY
 `UNTUNED` / `DELIBERATELY PERMISSIVE` block stating what it does, why that is insufficient, and what
 is intended. They are decisions awaiting a judgement call, not bugs.
 
-Currently: the failure taxonomy and pacing (`download.py`), failure-state handling (`store.py`),
+Currently: pacing (`download.py`), failure-state handling (`store.py`),
 isolation granularity (`pipeline.py`), registry injection (`tags.py`), Whisper model size
 (`config.toml`).
 

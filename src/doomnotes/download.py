@@ -53,45 +53,63 @@ def subprocess_runner(cmd: list[str], timeout: int) -> RunnerResult:
     return RunnerResult(proc.returncode, proc.stdout, proc.stderr)
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# ── DELIBERATELY NAIVE: failure taxonomy ─────────────────────────────────
-# CURRENT: every non-zero exit is treated as RETRYABLE, max 3 attempts,
-#   except the checkpoint carve-out below.
+# ── Failure taxonomy (decision 3.2) ──────────────────────────────────────
+# Classification is on yt-dlp's stderr, because the exit code is 1 for every
+# failure and carries no information.
 #
-# WHY THAT IS INSUFFICIENT: it retries a deleted video three times — wasted
-#   requests against a rate limit that matters — and without the carve-out
-#   would treat a challenge as retryable, which is what escalates it. The
-#   operating constraint is: on any captcha, checkpoint or unexpected
-#   redirect, STOP and report, do not retry.
-#
-#   Asymmetric cost on TikTok: there is no export caption, so misclassifying
-#   a transient failure as terminal loses that video permanently, with no
-#   note and no second chance.
-#
-# INTENDED: classify on yt-dlp's error string. The strings actually seen:
-#   terminal  — "Video unavailable", "This post is private", "content isn't
-#               available", "Unsupported URL", HTTP 404 / 410
-#   retryable — HTTP 429, 5xx, "Unable to download webpage", timeouts, DNS
-#   stop      — "checkpoint", "challenge_required", "login_required",
-#               "rate-limit reached", redirect to /accounts/login
-# Fixtures enumerating these are in tests/test_download.py.
+# The default for an unrecognised error is RETRYABLE, not TERMINAL, and the
+# asymmetry is why: a TikTok export ships no caption, so calling a transient
+# failure terminal loses that video permanently with nothing to fall back on.
+# Calling a terminal failure retryable only costs a wasted request.
 # ──────────────────────────────────────────────────────────────────────────
 
-STOP_MARKERS = ("checkpoint", "challenge_required", "captcha")
+# Halt the whole run. A challenge is escalated by retrying it, and a dead
+# session turns the rest of the batch into identical 401s that land in the
+# store as though the videos were the problem.
+STOP_MARKERS = (
+    "checkpoint",
+    "challenge_required",
+    "captcha",
+    "login_required",
+    "rate-limit reached",
+    "/accounts/login",
+)
+
+# The video is gone or was never fetchable. Retrying spends requests against a
+# rate limit that matters and cannot succeed.
+TERMINAL_MARKERS = (
+    "video unavailable",
+    "this post is private",
+    "content isn't available",
+    "unsupported url",
+    "http error 404",
+    "http error 410",
+)
+
+
 
 
 def classify(returncode: int, stderr: str) -> Outcome:
-    """Deliberately naive classifier — see the block above."""
+    """Map a yt-dlp exit to an outcome.
+
+    Order is load-bearing. STOP is checked first because a dead session's
+    message also contains wording that reads as terminal, and halting is always
+    the safer reading. TERMINAL is checked before the retryable default so an
+    explicit 404 is not retried by the fallback.
+    """
     if returncode == 0:
         return Outcome.OK
 
-    # The single exception carved out of the naive baseline: a checkpoint or
-    # captcha must never be retried, because retrying is what escalates it.
-    # This carve-out is correct even though the surrounding taxonomy is not.
     lowered = stderr.lower()
+
     if any(marker in lowered for marker in STOP_MARKERS):
         return Outcome.STOP
 
+    if any(marker in lowered for marker in TERMINAL_MARKERS):
+        return Outcome.TERMINAL
+
+    # Everything else is retryable, including errors not seen before. See the
+    # asymmetry note above: this default is the one that cannot lose a video.
     return Outcome.RETRYABLE
 
 

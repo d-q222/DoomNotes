@@ -58,30 +58,10 @@ def test_checkpoint_always_stops(stderr: str, expected: Outcome, note: str) -> N
     assert classify(1, stderr) is Outcome.STOP
 
 
-# The naive classifier calls every non-zero exit RETRYABLE, so the RETRYABLE
-# rows of the table pass — for the wrong reason. A table-wide xfail therefore
-# has to be non-strict, which is the same defect `test_store.py` documents:
-# a marker that cannot distinguish "not implemented" from "accidentally right".
-#
-# Marking per case fixes it. Only the rows the baseline actually gets wrong are
-# xfail(strict=True); the rest are ordinary passing tests. When classify() grows
-# a real taxonomy, every marker below comes off together and nothing xpasses.
-NAIVE_CLASSIFIER = pytest.mark.xfail(
-    reason="HANDS-ON #3.2: the naive classifier treats every non-zero exit as "
-           "RETRYABLE, so a deleted video is retried three times against a "
-           "rate limit that matters.",
-    strict=True,
-)
-
-
 @pytest.mark.parametrize(
     "stderr,expected,note",
     [
-        pytest.param(
-            stderr, expected, note,
-            id=note,
-            marks=[NAIVE_CLASSIFIER] if expected is Outcome.TERMINAL else [],
-        )
+        pytest.param(stderr, expected, note, id=note)
         for stderr, expected, note in REAL_ERRORS
         if expected is not Outcome.STOP
     ],
@@ -90,12 +70,16 @@ def test_classify_real_yt_dlp_errors(stderr: str, expected: Outcome, note: str) 
     assert classify(1, stderr) is expected
 
 
-@pytest.mark.xfail(
-    reason="HANDS-ON #3.2: `login_required` means the session is dead. The "
-           "STOP carve-out only matches checkpoint/challenge_required/captcha, "
-           "so a dead session is retried instead of halting the run.",
-    strict=True,
-)
+def test_an_unrecognised_error_is_retryable_not_terminal() -> None:
+    """The default that cannot lose a video.
+
+    TikTok's export ships no caption, so calling a transient failure terminal
+    loses the video permanently with nothing to fall back on. Calling a
+    terminal failure retryable only costs a wasted request.
+    """
+    assert classify(1, "ERROR: something nobody has seen before") is Outcome.RETRYABLE
+
+
 def test_a_dead_session_stops_the_run() -> None:
     """Continuing on a dead session spends the whole batch on 401s.
 
