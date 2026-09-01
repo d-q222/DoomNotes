@@ -18,6 +18,7 @@ import pytest
 from doomnotes.download import (
     DownloadResult,
     failure_reason,
+    is_auth_failure,
     Outcome,
     RunnerResult,
     build_command,
@@ -261,3 +262,41 @@ def test_an_unambiguous_dead_session_still_halts() -> None:
     stderr = "ERROR: [Instagram] Requested content is not available, login_required"
     assert classify(1, stderr) is Outcome.STOP
     assert failure_reason(stderr) == "session_dead"
+
+
+@pytest.mark.parametrize(
+    "stderr,reason",
+    [
+        ("ERROR: unable to download webpage: HTTP Error 401: Unauthorized", "unauthorized"),
+        ("ERROR: [Instagram] Login required to access this content", "auth_required"),
+    ],
+)
+def test_an_auth_failure_is_named_so_it_can_cost_no_attempt(stderr: str, reason: str) -> None:
+    """Retryable like any other, but distinguishable — which is the point.
+
+    A stale cookie is not a property of the video. If these were merely
+    "fetch_failed" the store could not tell them apart from a genuine failed
+    fetch, and every video would spend its whole budget proving the cookie is
+    still stale.
+    """
+    assert classify(1, stderr) is Outcome.RETRYABLE
+    assert failure_reason(stderr) == reason
+    assert is_auth_failure(reason)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "ERROR: unable to download webpage: HTTP Error 429: Too Many Requests",
+        "ERROR: unable to download webpage: HTTP Error 503: Service Unavailable",
+        "ERROR: unable to download webpage: HTTP Error 403: Forbidden",
+    ],
+)
+def test_contact_with_the_platform_still_costs_an_attempt(stderr: str) -> None:
+    """429 and 5xx are real contact and are what the cap exists to bound.
+
+    403 is here too, deliberately: it is geo-blocking as often as auth, and
+    exempting it would let a permanently region-locked video be retried on
+    every run forever — the unbounded case the cap was added to prevent.
+    """
+    assert not is_auth_failure(failure_reason(stderr))

@@ -858,3 +858,97 @@ def test_the_whole_retry_lifecycle_across_consecutive_runs(
 
     assert store.attempts_for(IG.url) == MAX_ATTEMPTS
     assert store.attempts_for(TT.url) == MAX_ATTEMPTS
+
+
+def test_an_auth_failure_costs_the_video_nothing(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """A stale cookie is not the video's fault, so it is not the video's cost.
+
+    Three runs against a dead session would otherwise spend every video's whole
+    budget proving the cookie is still stale, and write off the backlog — on
+    TikTok, permanently — while the actual fault sat in a file on disk.
+    """
+    d = deps(downloader=downloader_fails(
+        Outcome.RETRYABLE, "ERROR: unable to download webpage: HTTP Error 401: Unauthorized"
+    ))
+
+    for _ in range(MAX_ATTEMPTS * 2):
+        result = run(
+            [TT],
+            store=store,
+            writer=writer,
+            registry=TagRegistry(),
+            deps=d,
+            audio_dir=tmp_path / "audio",
+            auth_for=lambda p: {},
+            sleep_range=None,
+        )
+
+    assert result.blocked == 1
+    assert result.retryable == 0
+    assert store.state_of(TT.url) is State.RETRYABLE
+    assert store.attempts_for(TT.url) == 0, "no attempt may be consumed"
+    assert [r.url for r in store.filter_unprocessed([TT])] == [TT.url]
+
+
+def test_an_auth_failure_does_not_force_the_degraded_note(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """The ordering that makes the whole thing work.
+
+    This ref is already one attempt from the cap, so `last_chance` is true and
+    an ordinary retryable failure would salvage the caption and close the book.
+    An auth failure must not: the transcript is still reachable once the cookie
+    is fixed, and settling now would trade it away for someone else's problem.
+    """
+    store.register([IG])
+    for _ in range(MAX_ATTEMPTS - 1):
+        store.mark_failed(IG.url, "HTTP Error 429", terminal=False)
+    assert store.attempts_for(IG.url) == MAX_ATTEMPTS - 1
+
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "ERROR: unable to download webpage: HTTP Error 401: Unauthorized"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.caption_only == 0, "no degraded note on an auth failure"
+    assert result.blocked == 1
+    assert list(writer.root.glob("*.md")) == []
+    assert store.state_of(IG.url) is State.RETRYABLE
+    assert store.attempts_for(IG.url) == MAX_ATTEMPTS - 1, "budget untouched"
+
+
+def test_the_run_summary_names_an_auth_problem(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Nothing escalates on its own now, so the report has to say it.
+
+    An auth-blocked video costs no attempt and never becomes FAILED, so it will
+    sit in the queue indefinitely and no counter will ever cross a threshold.
+    The run summary is the only place this surfaces.
+    """
+    result = run(
+        [TT],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "ERROR: unable to download webpage: HTTP Error 401: Unauthorized"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    rendered = result.summary()
+    assert "auth-blocked: 1" in rendered, rendered
+    assert "cookies" in rendered

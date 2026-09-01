@@ -43,7 +43,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from doomnotes.download import DownloadResult, Outcome, download, sleep_seconds
+from doomnotes.download import (
+    DownloadResult,
+    Outcome,
+    download,
+    is_auth_failure,
+    sleep_seconds,
+)
 from doomnotes.journal import Journal, NullJournal
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.render import SlugIndex, render_note, render_transcript
@@ -73,6 +79,8 @@ class RunResult:
     failed: int = 0
     # Of `failed`, the ones the store will offer again next run.
     retryable: int = 0
+    # Of `failed`, auth failures — offered again AND costing no attempt.
+    blocked: int = 0
     stopped: bool = False
     stop_reason: str | None = None
     per_stage_failures: dict[str, int] = field(default_factory=dict)
@@ -88,6 +96,14 @@ class RunResult:
             f"  failed           : {self.failed}",
             f"    of which retryable: {self.retryable}",
         ]
+        if self.blocked:
+            # Said plainly rather than buried in the failure count: these cost
+            # no attempt, so nothing will ever escalate on its own, and the
+            # thing that needs fixing is not in the queue.
+            lines.append(
+                f"    of which auth-blocked: {self.blocked}  "
+                f"— no attempt consumed; check cookies, then re-run"
+            )
         for stage, n in sorted(self.per_stage_failures.items()):
             lines.append(f"      {stage:<12} {n}")
         if self.stopped:
@@ -111,7 +127,10 @@ def process_one(
     """Run one ref through every stage.
 
     Returns (status, detail, note_path) where status is one of:
-    "written", "caption_only", "retry", "failed", "stop".
+    "written", "caption_only", "retry", "blocked", "failed", "stop".
+
+    "blocked" is a retryable auth failure: requeued like "retry", but it does
+    not consume one of the video's attempts.
 
     `last_chance` says whether a retryable failure here would exhaust the
     video's attempts. It defaults to True — salvage now — because a caller
@@ -148,6 +167,14 @@ def process_one(
         # trade the real transcript for a degraded note the video may not need.
         # The caption is still there on the last attempt, so nothing is lost by
         # waiting — only by settling early.
+        # Checked BEFORE last_chance on purpose. An auth failure must not be
+        # what spends a video's final attempt, and must not be what forces the
+        # degraded caption-only note — the credentials get fixed and the video
+        # is tried properly, rather than being written off for someone else's
+        # problem.
+        if result.outcome is Outcome.RETRYABLE and is_auth_failure(result.reason):
+            return "blocked", f"download:{result.reason}: {result.error}", None
+
         if result.outcome is Outcome.RETRYABLE and not last_chance:
             return "retry", f"download:{result.reason or "unknown"}: {result.error}", None
 
@@ -263,13 +290,20 @@ def run(
             log.error("STOP: %s — halting run, not retrying. %s", ref.url, detail)
             break
 
-        if status in ("failed", "retry"):
+        if status in ("failed", "retry", "blocked"):
             out.failed += 1
             if status == "retry":
                 out.retryable += 1
+            if status == "blocked":
+                out.blocked += 1
             stage = (detail or "unknown:").split(":", 1)[0]
             out.per_stage_failures[stage] = out.per_stage_failures.get(stage, 0) + 1
-            store.mark_failed(ref.url, detail or "unknown", terminal=status == "failed")
+            store.mark_failed(
+                ref.url,
+                detail or "unknown",
+                terminal=status == "failed",
+                counts_as_attempt=status != "blocked",
+            )
         else:
             out.notes_written += 1
             if status == "caption_only":

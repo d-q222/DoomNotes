@@ -117,6 +117,11 @@ TERMINAL_REASONS = (
 RETRYABLE_REASONS = (
     ("http error 429", "rate_limited"),
     ("http error 5", "server_error"),
+    # Auth-shaped, but not the session-wide error code -- see AUTH_REASONS.
+    # Ahead of the generic markers so "unable to download webpage: HTTP Error
+    # 401" reads as an auth failure rather than as a failed fetch.
+    ("http error 401", "unauthorized"),
+    ("login required", "auth_required"),
     ("timed out", "timeout"),
     ("timeout", "timeout"),
     ("name resolution", "dns"),
@@ -126,6 +131,26 @@ RETRYABLE_REASONS = (
     # the more useful diagnosis.
     ("unable to download webpage", "fetch_failed"),
 )
+
+# Retryable failures that say something is wrong with the credentials rather
+# than with the video. They do NOT consume one of the video's attempts.
+#
+# The video was never really tried: the request failed on a precondition. If
+# these counted, a stale cookie would spend every video's whole attempt budget
+# over three runs and write off the backlog -- on TikTok, permanently -- while
+# the actual fault sat in ~/.config/doomnotes and was never the video's fault.
+#
+# Deliberately NOT included: 429 and 5xx. Those are real contact with the
+# platform and are exactly what the cap exists to bound. And not 403, which is
+# geo-blocking as often as auth: not counting it would let a permanently
+# region-locked video be retried on every run forever.
+AUTH_REASONS = frozenset({"unauthorized", "auth_required"})
+
+
+def is_auth_failure(reason: str | None) -> bool:
+    """Whether a failure was about the credentials rather than the video."""
+    return reason in AUTH_REASONS
+
 
 # Kept as flat tuples: several callers and tests ask "is this a stop marker?"
 STOP_MARKERS = tuple(marker for marker, _ in STOP_REASONS)

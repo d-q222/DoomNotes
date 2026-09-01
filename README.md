@@ -163,3 +163,6 @@ Saved-video data — URLs, creator handles, transcripts, notes — is not part o
 - Errors that are as likely to describe one video as the session — a bare `HTTP 401`, a single
   consent redirect — are retried rather than halting. A halt leaves the video unprocessed and
   first in the next queue, so halting on a per-video error stops the whole backlog for good.
+- An auth failure **costs the video none of its retry attempts**. A stale cookie is not a
+  property of the video, and three runs against a dead session would otherwise write off the
+  backlog while the actual fault sat in a file on disk. The run summary reports them.
