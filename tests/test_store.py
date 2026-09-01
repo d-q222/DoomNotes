@@ -91,26 +91,15 @@ def test_stats_group_by_platform_and_state(store: Store) -> None:
     assert stats["tiktok"][State.FAILED] == 1
 
 
-# ── the gap the baseline has ─────────────────────────────────────────────
+# ── the retry policy (decision 2.1) ──────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason="HANDS-ON #2.1: the naive store treats every failure as terminal, so a "
-           "transient error permanently drops the video from all future queues",
-    strict=True,
-)
 def test_retryable_failure_returns_to_the_queue(store: Store) -> None:
     store.register([C])
     store.mark_failed(C.url, "HTTP Error 429: Too Many Requests", terminal=False)
     assert [r.url for r in store.filter_unprocessed([C])] == [C.url]
 
 
-@pytest.mark.xfail(
-    reason="HANDS-ON #2.1: `attempts` is written but never read. The naive store "
-           "'bounds' retries only because it never retries at all — so the "
-           "first half of this test is what fails.",
-    strict=True,
-)
 def test_retries_are_bounded_but_do_happen(store: Store) -> None:
     """Both halves matter, and the baseline only satisfies the second.
 
@@ -127,3 +116,27 @@ def test_retries_are_bounded_but_do_happen(store: Store) -> None:
     for _ in range(5):
         store.mark_failed(C.url, "network blip", terminal=False)
     assert store.filter_unprocessed([C]) == [], "retries should stop at a cap"
+
+
+def test_a_terminal_failure_is_never_retried(store: Store) -> None:
+    """A deleted video must not consume three runs proving it is still deleted."""
+    store.register([C])
+    store.mark_failed(C.url, "Video unavailable", terminal=True)
+    assert store.filter_unprocessed([C]) == []
+    assert store.state_of(C.url) is State.FAILED
+
+
+def test_the_retry_backlog_is_visible(store: Store) -> None:
+    """A queue you cannot see is the failure mode this decision exists to fix.
+
+    `stats()` is what `doomnotes status` prints, and `failures()` is the list
+    under it. A video waiting to retry has to appear in both, or the only way
+    to learn it is pending again is to run and watch.
+    """
+    store.register([C])
+    store.mark_failed(C.url, "HTTP Error 429: Too Many Requests", terminal=False)
+
+    assert store.stats()["tiktok"][State.RETRYABLE] == 1
+    rows = store.failures()
+    assert [r["state"] for r in rows] == [State.RETRYABLE]
+    assert rows[0]["attempts"] == 1

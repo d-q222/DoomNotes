@@ -158,5 +158,8 @@ Saved-video data — URLs, creator handles, transcripts, notes — is not part o
 - Read-only. The tool never likes, follows, comments or messages.
 - Runs on a personal machine from a residential IP; never a cloud server.
 - Gentle cadence: a capped batch per run with randomised delays between downloads.
-- On any captcha, checkpoint or unexpected redirect the run **halts and reports**. It does not
+- On a captcha, checkpoint, challenge or dead session the run **halts and reports**. It does not
   retry, because retrying is what escalates a challenge.
+- Errors that are as likely to describe one video as the session — a bare `HTTP 401`, a single
+  consent redirect — are retried rather than halting. A halt leaves the video unprocessed and
+  first in the next queue, so halting on a per-video error stops the whole backlog for good.

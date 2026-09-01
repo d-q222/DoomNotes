@@ -47,7 +47,7 @@ from doomnotes.download import DownloadResult, Outcome, download, sleep_seconds
 from doomnotes.journal import Journal, NullJournal
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.render import SlugIndex, render_note, render_transcript
-from doomnotes.store import Store
+from doomnotes.store import MAX_ATTEMPTS, Store
 from doomnotes.summarize import SummarizeError, summarize
 from doomnotes.tags import TagRegistry
 from doomnotes.transcribe import transcribe
@@ -71,6 +71,8 @@ class RunResult:
     notes_written: int = 0
     caption_only: int = 0
     failed: int = 0
+    # Of `failed`, the ones the store will offer again next run.
+    retryable: int = 0
     stopped: bool = False
     stop_reason: str | None = None
     per_stage_failures: dict[str, int] = field(default_factory=dict)
@@ -84,6 +86,7 @@ class RunResult:
             f"  notes written    : {self.notes_written}",
             f"    of which caption-only: {self.caption_only}",
             f"  failed           : {self.failed}",
+            f"    of which retryable: {self.retryable}",
         ]
         for stage, n in sorted(self.per_stage_failures.items()):
             lines.append(f"      {stage:<12} {n}")
@@ -103,20 +106,31 @@ def process_one(
     transcripts_dir: str,
     taken_slugs: SlugIndex,
     keep_audio: bool = False,
+    last_chance: bool = True,
 ) -> tuple[str, str | None, Path | None]:
     """Run one ref through every stage.
 
     Returns (status, detail, note_path) where status is one of:
-    "written", "caption_only", "failed", "stop".
+    "written", "caption_only", "retry", "failed", "stop".
+
+    `last_chance` says whether a retryable failure here would exhaust the
+    video's attempts. It defaults to True — salvage now — because a caller
+    without a store has no way to record a retry, so deferring would lose the
+    video rather than postpone it.
     """
     # -- download ---------------------------------------------------------
     result = deps.downloader(ref, audio_dir, auth)
 
     if result.outcome is Outcome.STOP:
-        return "stop", result.error, None
+        return "stop", f"download:{result.reason or "unknown"}: {result.error}", None
 
     media: Media | None = result.media
     transcript: str | None = None
+    # Why the download failed, carried to the journal on the salvage path. A
+    # caption-only note with no recorded cause cannot be told apart from one
+    # for a video that was simply deleted, and `mark_done` clears the store's
+    # error column, so the journal is the only durable record of it.
+    salvaged_from: str | None = None
 
     if result.outcome is Outcome.OK and media is not None:
         # -- transcribe ---------------------------------------------------
@@ -129,8 +143,19 @@ def process_one(
         # A download failure is only survivable when the caption is already in
         # hand. Instagram's export carries it; TikTok's does not, and neither do
         # manual or Playwright refs — their caption arrives with the media.
+        # A retryable cause returns to the queue while attempts remain, even
+        # when a caption is in hand: settling for a caption-only note now would
+        # trade the real transcript for a degraded note the video may not need.
+        # The caption is still there on the last attempt, so nothing is lost by
+        # waiting — only by settling early.
+        if result.outcome is Outcome.RETRYABLE and not last_chance:
+            return "retry", f"download:{result.reason or "unknown"}: {result.error}", None
+
+        # Terminal, or out of attempts. Salvage the caption if there is one.
         if not ref.has_export_caption:
-            return "failed", f"download:{result.error}", None
+            return "failed", f"download:{result.reason or "unknown"}: {result.error}", None
+
+        salvaged_from = f"download:{result.reason or "unknown"}: {result.error}"
 
     # -- summarize --------------------------------------------------------
     try:
@@ -153,7 +178,7 @@ def process_one(
         # Audio is an intermediate. Transcripts are the durable artefact.
         Path(media.audio_path).unlink(missing_ok=True)
 
-    return ("written" if transcript else "caption_only"), None, note_path
+    return ("written" if transcript else "caption_only"), salvaged_from, note_path
 
 
 def run(
@@ -201,6 +226,7 @@ def run(
                 transcripts_dir=transcripts_dir,
                 taken_slugs=taken,
                 keep_audio=keep_audio,
+                last_chance=store.attempts_for(ref.url) >= MAX_ATTEMPTS - 1,
             )
         except VaultGuardError:
             # Never swallowed. A write was about to land outside the vault.
@@ -237,11 +263,13 @@ def run(
             log.error("STOP: %s — halting run, not retrying. %s", ref.url, detail)
             break
 
-        if status == "failed":
+        if status in ("failed", "retry"):
             out.failed += 1
+            if status == "retry":
+                out.retryable += 1
             stage = (detail or "unknown:").split(":", 1)[0]
             out.per_stage_failures[stage] = out.per_stage_failures.get(stage, 0) + 1
-            store.mark_failed(ref.url, detail or "unknown")
+            store.mark_failed(ref.url, detail or "unknown", terminal=status == "failed")
         else:
             out.notes_written += 1
             if status == "caption_only":

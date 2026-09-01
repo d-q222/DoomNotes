@@ -17,6 +17,7 @@ import pytest
 
 from doomnotes.download import (
     DownloadResult,
+    failure_reason,
     Outcome,
     RunnerResult,
     build_command,
@@ -58,30 +59,10 @@ def test_checkpoint_always_stops(stderr: str, expected: Outcome, note: str) -> N
     assert classify(1, stderr) is Outcome.STOP
 
 
-# The naive classifier calls every non-zero exit RETRYABLE, so the RETRYABLE
-# rows of the table pass — for the wrong reason. A table-wide xfail therefore
-# has to be non-strict, which is the same defect `test_store.py` documents:
-# a marker that cannot distinguish "not implemented" from "accidentally right".
-#
-# Marking per case fixes it. Only the rows the baseline actually gets wrong are
-# xfail(strict=True); the rest are ordinary passing tests. When classify() grows
-# a real taxonomy, every marker below comes off together and nothing xpasses.
-NAIVE_CLASSIFIER = pytest.mark.xfail(
-    reason="HANDS-ON #3.2: the naive classifier treats every non-zero exit as "
-           "RETRYABLE, so a deleted video is retried three times against a "
-           "rate limit that matters.",
-    strict=True,
-)
-
-
 @pytest.mark.parametrize(
     "stderr,expected,note",
     [
-        pytest.param(
-            stderr, expected, note,
-            id=note,
-            marks=[NAIVE_CLASSIFIER] if expected is Outcome.TERMINAL else [],
-        )
+        pytest.param(stderr, expected, note, id=note)
         for stderr, expected, note in REAL_ERRORS
         if expected is not Outcome.STOP
     ],
@@ -90,12 +71,16 @@ def test_classify_real_yt_dlp_errors(stderr: str, expected: Outcome, note: str) 
     assert classify(1, stderr) is expected
 
 
-@pytest.mark.xfail(
-    reason="HANDS-ON #3.2: `login_required` means the session is dead. The "
-           "STOP carve-out only matches checkpoint/challenge_required/captcha, "
-           "so a dead session is retried instead of halting the run.",
-    strict=True,
-)
+def test_an_unrecognised_error_is_retryable_not_terminal() -> None:
+    """The default that cannot lose a video.
+
+    TikTok's export ships no caption, so calling a transient failure terminal
+    loses the video permanently with nothing to fall back on. Calling a
+    terminal failure retryable only costs a wasted request.
+    """
+    assert classify(1, "ERROR: something nobody has seen before") is Outcome.RETRYABLE
+
+
 def test_a_dead_session_stops_the_run() -> None:
     """Continuing on a dead session spends the whole batch on 401s.
 
@@ -210,3 +195,69 @@ def test_sleep_stays_within_configured_bounds() -> None:
     rng = random.Random(0)
     for _ in range(200):
         assert 20.0 <= sleep_seconds(20, 90, rng) <= 90.0
+
+
+# ── descriptive failure reasons (3.2) ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "stderr,expected",
+    [
+        ("ERROR: [Instagram] AAA: Video unavailable", "deleted"),
+        ("ERROR: [Instagram] AAA: This post is private", "private"),
+        ("ERROR: [TikTok] 111: content isn't available", "unavailable_here"),
+        ("ERROR: unable to download video data: HTTP Error 404: Not Found", "not_found"),
+        ("ERROR: unable to download webpage: HTTP Error 429: Too Many Requests", "rate_limited"),
+        ("ERROR: unable to download webpage: HTTP Error 503: Service Unavailable", "server_error"),
+        ("ERROR: Unable to download webpage: <urlopen error timed out>", "timeout"),
+        ("ERROR: [Instagram] Requested content is not available, login_required", "session_dead"),
+        ("ERROR: [Instagram] challenge_required: checkpoint", "checkpoint"),
+        ("ERROR: something nobody has seen before", "unknown"),
+    ],
+)
+def test_failure_reason_is_descriptive(stderr: str, expected: str) -> None:
+    """'the video failed' is not a diagnosis. The store records this instead."""
+    assert failure_reason(stderr) == expected
+
+
+@pytest.mark.parametrize("stderr,expected,note", REAL_ERRORS)
+def test_reason_and_outcome_cannot_disagree(stderr: str, expected: Outcome, note: str) -> None:
+    """Both read the same tables, so a reason always implies its own bucket.
+
+    If these could drift, a failure could be reported as "deleted" while being
+    retried, or as "rate_limited" while being written off.
+    """
+    reason = failure_reason(stderr)
+    assert reason != "unknown", f"{note} should have a named reason"
+    assert classify(1, stderr) is expected
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "ERROR: unable to download webpage: HTTP Error 401: Unauthorized",
+        "ERROR: unable to download webpage: HTTP Error 403: Forbidden",
+        "ERROR: [Instagram] Login required to access this content",
+        "ERROR: [Instagram] redirected to /consent/",
+    ],
+)
+def test_an_ambiguous_auth_error_is_retryable_not_a_halt(stderr: str) -> None:
+    """These look like a dead session and are just as often one bad video.
+
+    STOP is not a per-video outcome: `pipeline.run` breaks without marking the
+    video, so it stays PENDING and is offered first next run. Classifying a
+    per-video 401 or a one-off consent interstitial as STOP wedges the queue
+    forever — every run halts on the same video and nothing behind it is ever
+    attempted. On TikTok that loses the whole remaining backlog, not one video.
+
+    Retrying costs three requests. Halting costs everything after it.
+    """
+    assert classify(1, stderr) is Outcome.RETRYABLE
+
+
+def test_an_unambiguous_dead_session_still_halts() -> None:
+    """The token form is yt-dlp's own error code, not prose that may describe
+    one video. That distinction is the whole reason the list stayed narrow."""
+    stderr = "ERROR: [Instagram] Requested content is not available, login_required"
+    assert classify(1, stderr) is Outcome.STOP
+    assert failure_reason(stderr) == "session_dead"

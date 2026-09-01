@@ -29,11 +29,11 @@ from pathlib import Path
 
 import pytest
 
-from doomnotes.download import DownloadResult, Outcome
+from doomnotes.download import DownloadResult, Outcome, failure_reason
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.pipeline import Deps, RunResult, process_one, run
 from doomnotes.render import SlugIndex
-from doomnotes.store import State, Store
+from doomnotes.store import MAX_ATTEMPTS, State, Store
 from doomnotes.summarize import SummarizeError
 from doomnotes.tags import TagRegistry
 from doomnotes.vault import VaultGuardError, VaultWriter
@@ -109,7 +109,9 @@ def downloader_ok(audio_name: str = "AAA.m4a"):
 
 def downloader_fails(outcome: Outcome = Outcome.TERMINAL, error: str = "Video unavailable"):
     def inner(ref: VideoRef, audio_dir: Path, auth: dict) -> DownloadResult:
-        return DownloadResult(ref, outcome, error=error)
+        # Derive the reason exactly as download() does. A fixture that omits it
+        # tests a DownloadResult shape production never produces.
+        return DownloadResult(ref, outcome, error=error, reason=failure_reason(error))
 
     return inner
 
@@ -642,3 +644,217 @@ def test_a_systemic_stage_outage_does_not_consume_the_batch(
 # stops being a specification and becomes a mechanism the decision has to obey.
 # The gap is documented in pipeline.py's HANDS-ON block and HANDS_ON.md §7.1;
 # it stays prose until the shape of the seam is chosen.
+
+
+def test_a_transient_download_failure_is_left_retryable(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """The TikTok case the whole decision is for.
+
+    No export caption means nothing to salvage, so the only thing standing
+    between a rate limit and a permanently lost video is that the store offers
+    it again. Asserting the state, not just the counter, because the counter
+    would look identical if it were written off.
+    """
+    result = run(
+        [TT],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.failed == 1
+    assert result.retryable == 1
+    assert store.state_of(TT.url) is State.RETRYABLE
+    assert [r.url for r in store.filter_unprocessed([TT])] == [TT.url]
+
+
+def test_a_transient_failure_does_not_settle_for_the_caption_yet(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """An Instagram ref has a caption, so it *could* be salvaged immediately.
+
+    It should not be. A 429 says nothing about the video, and writing the
+    caption-only note now trades the real transcript for a degraded note while
+    attempts remain. The caption is not going anywhere.
+    """
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.notes_written == 0, "no note while a retry is still possible"
+    assert result.caption_only == 0
+    assert result.retryable == 1
+    assert store.state_of(IG.url) is State.RETRYABLE
+    assert list(writer.root.glob("*.md")) == []
+
+
+def test_the_caption_is_salvaged_on_the_last_attempt(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Deferring must not become losing.
+
+    Once the attempts are spent the video is written off either way, so the
+    caption-only note is strictly better than nothing — which is the whole
+    reason the salvage path exists.
+    """
+    store.register([IG])
+    for _ in range(MAX_ATTEMPTS - 1):
+        store.mark_failed(IG.url, "HTTP Error 429: Too Many Requests", terminal=False)
+
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.RETRYABLE, "HTTP Error 429: Too Many Requests"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.caption_only == 1, "the last attempt falls back to the caption"
+    assert store.state_of(IG.url) is State.DONE
+    assert len(list(writer.root.glob("*.md"))) == 1
+
+
+def test_a_terminal_failure_salvages_immediately(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """A deleted video is not coming back, so there is nothing to wait for."""
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.TERMINAL, "Video unavailable")),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.caption_only == 1
+    assert result.retryable == 0
+    assert store.state_of(IG.url) is State.DONE
+
+
+def test_a_caption_only_note_records_why_the_download_failed(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Otherwise a salvaged note is indistinguishable from an ordinary one.
+
+    `mark_done` clears the store's error column, so the journal is the only
+    durable record that this note exists because a download failed, and of
+    which failure it was.
+    """
+    records = []
+
+    class Recorder:
+        """Matches the Journal protocol: write() and close(), nothing else."""
+
+        def write(self, event: str, **fields) -> None:
+            records.append({"event": event, **fields})
+
+        def close(self) -> None:
+            return None
+
+    run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.TERMINAL, "Video unavailable")),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+        journal=Recorder(),
+    )
+
+    videos = [r for r in records if r["event"] == "video"]
+    assert len(videos) == 1
+    assert videos[0]["status"] == "caption_only"
+    assert "deleted" in (videos[0]["detail"] or ""), videos[0]["detail"]
+
+
+def test_a_stop_reports_its_descriptive_reason(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """"the run stopped" is not a diagnosis: a checkpoint and a dead session
+    need different responses from the person reading the report."""
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.STOP, "ERROR: [Instagram] Requested content is not available, login_required"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+    assert result.stopped is True
+    assert "session_dead" in (result.stop_reason or ""), result.stop_reason
+
+
+def test_the_whole_retry_lifecycle_across_consecutive_runs(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Four runs against one store, as days apart would look.
+
+    The unit tests each pin one moment. What actually matters is the sequence,
+    and it is the thing a reader has to trust: retries must be bounded AND must
+    happen, and the caption must be held back until there is nothing left to
+    wait for. An off-by-one anywhere shows up here as a fourth attempt or as a
+    note written on run 1.
+    """
+    err = "ERROR: unable to download webpage: HTTP Error 429: Too Many Requests"
+    d = deps(downloader=downloader_fails(Outcome.RETRYABLE, err))
+
+    seen = []
+    for _ in range(4):
+        result = run(
+            [IG, TT],
+            store=store,
+            writer=writer,
+            registry=TagRegistry(),
+            deps=d,
+            audio_dir=tmp_path / "audio",
+            auth_for=lambda p: {},
+            sleep_range=None,
+        )
+        seen.append((
+            result.attempted,
+            store.state_of(IG.url),
+            store.state_of(TT.url),
+            len(list(writer.root.glob("*.md"))),
+        ))
+
+    assert seen == [
+        (2, State.RETRYABLE, State.RETRYABLE, 0),
+        (2, State.RETRYABLE, State.RETRYABLE, 0),
+        # Last attempt: Instagram falls back to its caption, TikTok has nothing.
+        (2, State.DONE, State.FAILED, 1),
+        # Both are processed now, so the batch is empty. Bounded at three.
+        (0, State.DONE, State.FAILED, 1),
+    ], seen
+
+    assert store.attempts_for(IG.url) == MAX_ATTEMPTS
+    assert store.attempts_for(TT.url) == MAX_ATTEMPTS
