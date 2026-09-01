@@ -132,11 +132,29 @@ should not require a refactor.
 |---|---|---|
 | terminal | video unavailable, private post, 404 | log, move on, never retry |
 | retryable | 429, 5xx, timeouts, DNS | back off and requeue |
-| **stop** | checkpoint, challenge, login required | **halt the run, report, do not retry** |
+| **stop** | checkpoint, challenge_required, captcha, `login_required` | **halt the run, report, do not retry** |
 
 The stop class exists because retrying a challenge is what escalates it. Misclassification is
 asymmetric in cost: on TikTok there is no export caption, so treating a transient failure as
 terminal loses that video permanently, with no note and no second chance.
+
+**Stop is deliberately narrow, and the asymmetry runs the other way here.** A stop is a *run*
+outcome, not a *video* one: `pipeline.run` breaks without marking the video, so its URL stays
+`PENDING` and is offered first next run. That is the right resume for a checkpoint. It is a
+permanent queue wedge if the classifier fires on something true of only that one video — every
+later run halts on the same URL and nothing behind it is ever attempted.
+
+So the list holds only session-scoped strings, matched as yt-dlp's own error codes rather than
+as prose. A bare `HTTP 401`, a one-off consent redirect and the prose "login required" are
+deliberately **retryable**: each is a property of one video as often as of the session, and
+retrying one costs three requests while halting on one costs the rest of the queue. `403` is
+retryable for the same reason — geo-blocking and auth are indistinguishable from the message.
+
+**The gap this leaves is real.** A dead session that never emits `login_required` — only prose,
+or a bare 401 — is not detected as systemic. Every video then fails retryably and, after
+`MAX_ATTEMPTS` runs, is written off. A dead session shows up as *repeated* failures across
+videos, and a per-error classifier cannot see across videos. Closing that is stage isolation
+(#7.1), which is still an open decision with its own `xfail`.
 
 **`posted_at` comes from yt-dlp metadata**, which only exists if the download succeeded. It is
 therefore absent on caption-only notes — the field intended to judge recency is missing on
