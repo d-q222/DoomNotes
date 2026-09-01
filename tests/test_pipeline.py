@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from doomnotes.download import DownloadResult, Outcome
+from doomnotes.download import DownloadResult, Outcome, failure_reason
 from doomnotes.models import Media, Note, VideoRef
 from doomnotes.pipeline import Deps, RunResult, process_one, run
 from doomnotes.render import SlugIndex
@@ -109,7 +109,9 @@ def downloader_ok(audio_name: str = "AAA.m4a"):
 
 def downloader_fails(outcome: Outcome = Outcome.TERMINAL, error: str = "Video unavailable"):
     def inner(ref: VideoRef, audio_dir: Path, auth: dict) -> DownloadResult:
-        return DownloadResult(ref, outcome, error=error)
+        # Derive the reason exactly as download() does. A fixture that omits it
+        # tests a DownloadResult shape production never produces.
+        return DownloadResult(ref, outcome, error=error, reason=failure_reason(error))
 
     return inner
 
@@ -751,3 +753,62 @@ def test_a_terminal_failure_salvages_immediately(
     assert result.caption_only == 1
     assert result.retryable == 0
     assert store.state_of(IG.url) is State.DONE
+
+
+def test_a_caption_only_note_records_why_the_download_failed(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Otherwise a salvaged note is indistinguishable from an ordinary one.
+
+    `mark_done` clears the store's error column, so the journal is the only
+    durable record that this note exists because a download failed, and of
+    which failure it was.
+    """
+    records = []
+
+    class Recorder:
+        """Matches the Journal protocol: write() and close(), nothing else."""
+
+        def write(self, event: str, **fields) -> None:
+            records.append({"event": event, **fields})
+
+        def close(self) -> None:
+            return None
+
+    run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.TERMINAL, "Video unavailable")),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+        journal=Recorder(),
+    )
+
+    videos = [r for r in records if r["event"] == "video"]
+    assert len(videos) == 1
+    assert videos[0]["status"] == "caption_only"
+    assert "deleted" in (videos[0]["detail"] or ""), videos[0]["detail"]
+
+
+def test_a_stop_reports_its_descriptive_reason(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """"the run stopped" is not a diagnosis: a checkpoint and a dead session
+    need different responses from the person reading the report."""
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(
+            Outcome.STOP, "ERROR: [Instagram] Requested content is not available, login_required"
+        )),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+    assert result.stopped is True
+    assert "session_dead" in (result.stop_reason or ""), result.stop_reason

@@ -230,3 +230,30 @@ def test_reason_and_outcome_cannot_disagree(stderr: str, expected: Outcome, note
     reason = failure_reason(stderr)
     assert reason != "unknown", f"{note} should have a named reason"
     assert classify(1, stderr) is expected
+
+
+@pytest.mark.parametrize(
+    "stderr,reason",
+    [
+        ("ERROR: unable to download webpage: HTTP Error 401: Unauthorized", "unauthorized"),
+        ("ERROR: [Instagram] Login required to access this content", "session_dead"),
+        ("ERROR: [Instagram] redirected to /consent/", "consent_redirect"),
+    ],
+)
+def test_an_auth_failure_halts_rather_than_being_retried(stderr: str, reason: str) -> None:
+    """A dead session is not a property of the video.
+
+    Retried instead of halted, it spends the whole batch on identical 401s and
+    files each one in the store as though the video were the problem. Only the
+    `login_required` token form was matched, so the prose form, the bare HTTP
+    status and a consent redirect all fell through to RETRYABLE.
+    """
+    assert classify(1, stderr) is Outcome.STOP
+    assert failure_reason(stderr) == reason
+
+
+def test_an_ambiguous_403_stays_retryable() -> None:
+    """403 is geo-blocking as often as it is auth, and the default is the one
+    that cannot lose a video. Pinned so widening STOP stays deliberate."""
+    stderr = "ERROR: unable to download webpage: HTTP Error 403: Forbidden"
+    assert classify(1, stderr) is Outcome.RETRYABLE

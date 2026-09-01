@@ -122,10 +122,15 @@ def process_one(
     result = deps.downloader(ref, audio_dir, auth)
 
     if result.outcome is Outcome.STOP:
-        return "stop", result.error, None
+        return "stop", f"download:{result.reason or "unknown"}: {result.error}", None
 
     media: Media | None = result.media
     transcript: str | None = None
+    # Why the download failed, carried to the journal on the salvage path. A
+    # caption-only note with no recorded cause cannot be told apart from one
+    # for a video that was simply deleted, and `mark_done` clears the store's
+    # error column, so the journal is the only durable record of it.
+    salvaged_from: str | None = None
 
     if result.outcome is Outcome.OK and media is not None:
         # -- transcribe ---------------------------------------------------
@@ -144,11 +149,13 @@ def process_one(
         # The caption is still there on the last attempt, so nothing is lost by
         # waiting — only by settling early.
         if result.outcome is Outcome.RETRYABLE and not last_chance:
-            return "retry", f"download:{result.reason}: {result.error}", None
+            return "retry", f"download:{result.reason or "unknown"}: {result.error}", None
 
         # Terminal, or out of attempts. Salvage the caption if there is one.
         if not ref.has_export_caption:
-            return "failed", f"download:{result.reason}: {result.error}", None
+            return "failed", f"download:{result.reason or "unknown"}: {result.error}", None
+
+        salvaged_from = f"download:{result.reason or "unknown"}: {result.error}"
 
     # -- summarize --------------------------------------------------------
     try:
@@ -171,7 +178,7 @@ def process_one(
         # Audio is an intermediate. Transcripts are the durable artefact.
         Path(media.audio_path).unlink(missing_ok=True)
 
-    return ("written" if transcript else "caption_only"), None, note_path
+    return ("written" if transcript else "caption_only"), salvaged_from, note_path
 
 
 def run(

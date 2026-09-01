@@ -77,8 +77,15 @@ STOP_REASONS = (
     ("challenge_required", "challenge_required"),
     ("captcha", "captcha"),
     ("login_required", "session_dead"),
+    # The prose form, and the HTTP status behind it. Without these a dead
+    # session is retried, and the rest of the batch becomes identical 401s that
+    # land in the store as though the videos were the problem.
+    ("login required", "session_dead"),
+    ("http error 401", "unauthorized"),
     ("rate-limit reached", "rate_limit_hard"),
+    # "on any captcha, checkpoint or unexpected redirect: halt and report."
     ("/accounts/login", "login_redirect"),
+    ("/consent", "consent_redirect"),
 )
 
 # The video is gone or was never fetchable. Retrying spends requests against a
