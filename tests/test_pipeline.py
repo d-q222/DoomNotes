@@ -858,3 +858,206 @@ def test_the_whole_retry_lifecycle_across_consecutive_runs(
 
     assert store.attempts_for(IG.url) == MAX_ATTEMPTS
     assert store.attempts_for(TT.url) == MAX_ATTEMPTS
+
+
+AUTH_ERR = "ERROR: unable to download webpage: HTTP Error 401: Unauthorized"
+
+
+def test_one_auth_failure_among_successes_is_charged(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """A lone 401 is evidence about that video, not about the session.
+
+    This is what bounds the exemption. Without it a reel that permanently 401s
+    could never reach the cap, never take the caption-only escape hatch, and
+    would hold a batch slot on every future run — while the summary blamed
+    credentials that were fine.
+    """
+    second = replace(IG, url="https://www.instagram.com/reel/BBBBBBBBBBB/", source_order=1)
+
+    def downloader(ref, audio_dir, auth):
+        if ref.url == TT.url:
+            return downloader_fails(Outcome.RETRYABLE, AUTH_ERR)(ref, audio_dir, auth)
+        return downloader_ok()(ref, audio_dir, auth)
+
+    result = run(
+        [TT, second],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0, "one failure is not evidence of a session problem"
+    assert result.retryable == 1, "and it is reported as the ordinary retry it became"
+    assert store.attempts_for(TT.url) == 1, "charged"
+    assert store.state_of(TT.url) is State.RETRYABLE
+
+    # And because it is charged, it terminates. This is the bound: run it out
+    # and the video is written off like any other, instead of occupying a slot
+    # in every future batch forever.
+    for _ in range(MAX_ATTEMPTS):
+        run(
+            [TT, second],
+            store=store,
+            writer=writer,
+            registry=TagRegistry(),
+            deps=deps(downloader=downloader),
+            audio_dir=tmp_path / "audio",
+            auth_for=lambda p: {},
+            sleep_range=None,
+        )
+    assert store.state_of(TT.url) is State.FAILED
+    assert store.attempts_for(TT.url) == MAX_ATTEMPTS
+    assert store.filter_unprocessed([TT]) == [], "no longer offered"
+
+
+def test_several_auth_failures_in_one_run_cost_nothing(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """The second identical failure is the first evidence it is not the video.
+
+    A dead session would otherwise spend every video's whole budget proving the
+    cookie is still stale, and write off the backlog — permanently on TikTok —
+    while the fault sat in a file on disk.
+    """
+    second = replace(TT, url="https://www.tiktokv.com/share/video/2222222222222222222/", source_order=1)
+    d = deps(downloader=downloader_fails(Outcome.RETRYABLE, AUTH_ERR))
+
+    for _ in range(MAX_ATTEMPTS * 2):
+        result = run(
+            [TT, second],
+            store=store,
+            writer=writer,
+            registry=TagRegistry(),
+            deps=d,
+            audio_dir=tmp_path / "audio",
+            auth_for=lambda p: {},
+            sleep_range=None,
+        )
+
+    assert result.blocked == 2
+    assert store.attempts_for(TT.url) == 0
+    assert store.attempts_for(second.url) == 0
+    assert store.state_of(TT.url) is State.RETRYABLE
+    assert [r.url for r in store.filter_unprocessed([TT, second])] == [TT.url, second.url]
+
+
+def test_the_exemption_does_not_apply_on_the_final_attempt(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Residency has to be bounded even when the session really is dead.
+
+    An exemption that also applied on the last attempt would mean a video that
+    only ever fails on auth never resolves at all. On its final attempt the
+    video is settled instead: Instagram takes the caption it already has.
+    """
+    store.register([IG])
+    for _ in range(MAX_ATTEMPTS - 1):
+        store.mark_failed(IG.url, "HTTP Error 429", terminal=False)
+
+    result = run(
+        [IG],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.RETRYABLE, AUTH_ERR)),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0
+    assert result.caption_only == 1, "the caption it already has beats nothing"
+    assert store.state_of(IG.url) is State.DONE
+
+
+def test_the_run_summary_names_a_session_problem(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Nothing escalates on its own once the failures are free, so say it.
+
+    Exempted videos cost no attempt and never become FAILED, so no counter ever
+    crosses a threshold. The summary is the only place this surfaces.
+    """
+    second = replace(TT, url="https://www.tiktokv.com/share/video/3333333333333333333/", source_order=1)
+    result = run(
+        [TT, second],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.RETRYABLE, AUTH_ERR)),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    rendered = result.summary()
+    assert "auth-blocked: 2" in rendered, rendered
+    assert "cookies" in rendered
+
+
+def test_auth_failures_alongside_successes_are_still_charged(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Corroboration is not enough on its own — the successes are the tell.
+
+    Two reels that permanently 401 will corroborate each other on every run
+    forever. If that alone counted as a credentials problem they would never be
+    charged, never reach the cap, never take the caption-only hatch, and hold
+    two batch slots for good — the exact unbounded shape this bound exists to
+    remove. A third video succeeding on the same cookies says the cookies work.
+    """
+    bad_a = replace(TT, url="https://www.tiktokv.com/share/video/4444444444444444444/", source_order=0)
+    bad_b = replace(TT, url="https://www.tiktokv.com/share/video/5555555555555555555/", source_order=1)
+    good = replace(TT, url="https://www.tiktokv.com/share/video/6666666666666666666/", source_order=2)
+    bad = {bad_a.url, bad_b.url}
+
+    def downloader(ref, audio_dir, auth):
+        if ref.url in bad:
+            return downloader_fails(Outcome.RETRYABLE, AUTH_ERR)(ref, audio_dir, auth)
+        return downloader_ok()(ref, audio_dir, auth)
+
+    result = run(
+        [bad_a, bad_b, good],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0, "something got through on these credentials"
+    assert store.attempts_for(bad_a.url) == 1
+    assert store.attempts_for(bad_b.url) == 1
+
+
+def test_one_failure_on_each_platform_does_not_corroborate(
+    writer: VaultWriter, store: Store, tmp_path: Path
+) -> None:
+    """Credentials are per platform, so the evidence is too.
+
+    `[auth.instagram]` and `[auth.tiktok]` have separate modes and separate
+    cookie files. An Instagram 401 and a TikTok 401 are two unrelated facts;
+    letting them corroborate each other would exempt both on evidence that does
+    not exist, and neither would ever be charged.
+    """
+    result = run(
+        [IG, TT],
+        store=store,
+        writer=writer,
+        registry=TagRegistry(),
+        deps=deps(downloader=downloader_fails(Outcome.RETRYABLE, AUTH_ERR)),
+        audio_dir=tmp_path / "audio",
+        auth_for=lambda p: {},
+        sleep_range=None,
+    )
+
+    assert result.blocked == 0, "one failure per platform is one failure each"
+    assert store.attempts_for(IG.url) == 1
+    assert store.attempts_for(TT.url) == 1

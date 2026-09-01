@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from doomnotes.models import VideoRef
-from doomnotes.store import State, Store
+from doomnotes.store import MAX_ATTEMPTS, State, Store
 
 A = VideoRef("https://www.instagram.com/reel/AAA/", "instagram", caption_source="export", caption="a", source_order=0)
 B = VideoRef("https://www.instagram.com/reel/BBB/", "instagram", caption_source="export", caption="b", source_order=1)
@@ -140,3 +140,38 @@ def test_the_retry_backlog_is_visible(store: Store) -> None:
     rows = store.failures()
     assert [r["state"] for r in rows] == [State.RETRYABLE]
     assert rows[0]["attempts"] == 1
+
+
+def test_an_uncounted_failure_never_reaches_the_cap(store: Store) -> None:
+    """A video that was never really tried must not be written off.
+
+    The request failed on a precondition — a stale cookie — so however many
+    runs hit it, the video stays in the queue. The fault gets fixed in
+    ~/.config/doomnotes, not by exhausting the video's attempts.
+    """
+    store.register([C])
+    for _ in range(MAX_ATTEMPTS * 3):
+        store.mark_failed(C.url, "HTTP Error 401", terminal=False, counts_as_attempt=False)
+
+    assert store.state_of(C.url) is State.RETRYABLE
+    assert store.attempts_for(C.url) == 0
+    assert [r.url for r in store.filter_unprocessed([C])] == [C.url]
+
+
+def test_an_uncounted_failure_does_not_erase_earlier_attempts(store: Store) -> None:
+    """It costs nothing; it does not refund anything either.
+
+    Two genuine 429s then a stale cookie must still leave the video one real
+    attempt from being written off, or an intermittent auth failure would keep
+    resetting the budget and the cap would stop bounding anything.
+    """
+    store.register([C])
+    store.mark_failed(C.url, "HTTP Error 429", terminal=False)
+    store.mark_failed(C.url, "HTTP Error 429", terminal=False)
+    store.mark_failed(C.url, "HTTP Error 401", terminal=False, counts_as_attempt=False)
+
+    assert store.attempts_for(C.url) == 2
+    assert store.state_of(C.url) is State.RETRYABLE
+
+    store.mark_failed(C.url, "HTTP Error 429", terminal=False)
+    assert store.state_of(C.url) is State.FAILED

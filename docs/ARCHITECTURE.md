@@ -150,11 +150,50 @@ deliberately **retryable**: each is a property of one video as often as of the s
 retrying one costs three requests while halting on one costs the rest of the queue. `403` is
 retryable for the same reason — geo-blocking and auth are indistinguishable from the message.
 
-**The gap this leaves is real.** A dead session that never emits `login_required` — only prose,
-or a bare 401 — is not detected as systemic. Every video then fails retryably and, after
-`MAX_ATTEMPTS` runs, is written off. A dead session shows up as *repeated* failures across
-videos, and a per-error classifier cannot see across videos. Closing that is stage isolation
-(#7.1), which is still an open decision with its own `xfail`.
+**An auth failure costs the video nothing — when it looks like the session's fault.** A dead session that never emits `login_required` —
+only prose, or a bare 401 — is retryable like anything else, but it is named (`unauthorized`,
+`auth_required`) and recorded with `counts_as_attempt=False`. The request failed on a
+precondition, so the video was never really tried, and a video that was never tried must not be
+written off. Such a row can never reach the cap from that path: the fault is in the credentials
+and gets fixed there, not by exhausting the queue.
+
+Deliberately excluded from that exemption: `429` and `5xx`, which are real contact with the
+platform and exactly what the cap exists to bound; and `403`, which is geo-blocking as often as
+auth — exempting it would let a permanently region-locked video be retried on every run forever.
+
+**"The session's fault" is measured, not assumed**, because a bare 401 is exactly as ambiguous
+as a 403. Two conditions, both required, evaluated **per platform**:
+
+- at least `AUTH_SYSTEMIC_THRESHOLD` videos of that platform failed on auth in this run, and
+- nothing of that platform got through.
+
+The second is what bounds it. Corroboration alone is not evidence: two reels that permanently
+401 corroborate each other on every run forever, and exempting them on that basis would be the
+same unbounded residency the rule exists to prevent. A third video succeeding on the same
+cookies says the cookies work, so the failures belong to those videos and charging them is what
+makes them terminate.
+
+Per platform because credentials are per platform — `[auth.instagram]` and `[auth.tiktok]` have
+separate modes and separate cookie files. An Instagram 401 and a TikTok 401 are two unrelated
+facts, and letting them corroborate each other would exempt both on evidence that does not exist.
+
+The residual ambiguity is a batch in which every attempted video of a platform fails on auth and
+the credentials are in fact fine. From inside one run that is indistinguishable from a dead
+session, and there is no cross-run evidence to appeal to.
+
+The decision is made at the end of the batch, once the count is known, so the store write is
+held until then. Holding fails in the safe direction: a run that dies mid-batch simply leaves
+those rows untouched, and the videos are offered again.
+
+The exemption also does not apply on a video's **final** attempt. One that did would leave a
+video which only ever fails on auth unable to resolve at all; on the last attempt it is settled
+instead, and Instagram takes the caption it already has.
+
+**What remains open.** Nothing escalates on its own. An auth-blocked video sits in the queue
+indefinitely and no counter crosses a threshold, so the run summary saying `auth-blocked: N —
+check cookies` is the only signal. Deciding that a run should *stop* once several consecutive
+videos fail that way means telling a systemic outage from an item failure, which is stage
+isolation (#7.1) — still open, with its own `xfail`.
 
 **`posted_at` comes from yt-dlp metadata**, which only exists if the download succeeded. It is
 therefore absent on caption-only notes — the field intended to judge recency is missing on

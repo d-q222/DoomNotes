@@ -157,6 +157,43 @@ independent privacy review of the finished diff.
 Require concise findings with file paths and unresolved uncertainties — not raw logs. Verify
 consequential worker conclusions yourself; a confident review can still be wrong.
 
+### Reviewing a repair
+
+**A fix is a change, and it earns the same scrutiny as the code it replaced.** Every expensive
+defect here so far was introduced by a repair rather than by the original work: the case-folding
+fix in #2 created the data-loss path it was added to prevent; the STOP widening in #5 turned a
+per-video 401 into a permanent queue wedge; the auth exemption in #6 applied an unbounded
+exemption to an error the same diff called ambiguous.
+
+The mechanism is consistent, so it can be checked for. A fix is written with the *bug* in working
+memory rather than the system. It lands in the module that produced the symptom, and the
+consequence appears in a consumer one module away. And fixes are usually *widenings*, which are
+monotone in "catches more" and in "false positives" at the same time — only the first is being
+watched.
+
+Reviewing a repair therefore asks different questions from reviewing new work. Ask these four, in
+a fresh thread that is **not** given the original finding as its frame:
+
+1. **What does this make newly possible?** Not "is it correct" — assume it fixes the stated bug.
+   Name states, sequences or inputs that could not occur before this diff and can now, then say
+   which are harmful.
+2. **Sweep the consumers.** For every signature, return value or status the fix touches, find the
+   callers and review *those*, not the edit site.
+3. **Write the pre-mortem.** Assume it caused an incident in three months; write the report; then
+   say whether the diff actually permits that story. A causal chain can be checked against the
+   code. "Looks clean" cannot.
+4. **Check the symmetry.** When a fix adds a case to a classification, ask whether the mirror
+   case is treated consistently. Two of the defects above were asymmetries a single line of
+   checking would have caught.
+
+The trigger is mechanical rather than a matter of judgement: **when a change alters how something
+is classified, review the branches that consume the classification.** Classification is inert on
+its own; every one of those defects came from what the caller did with it.
+
+Note that this is a different *question*, not more effort on the same one. Asked "is this diff
+correct", reviewers returned clean on two of those changes. Asked "what does this make newly
+possible", the same reviewers on the same diff found the defect immediately.
+
 ## 8. Token and tool efficiency
 
 - Use deterministic tools before model reasoning: `rg`, `find`, `pytest`, `git`.

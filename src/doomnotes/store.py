@@ -151,7 +151,13 @@ class Store:
         )
         self.conn.commit()
 
-    def mark_failed(self, url: str, error: str, terminal: bool = True) -> None:
+    def mark_failed(
+        self,
+        url: str,
+        error: str,
+        terminal: bool = True,
+        counts_as_attempt: bool = True,
+    ) -> None:
         """Record a failure.
 
         A terminal failure is final immediately. A retryable one returns to the
@@ -159,21 +165,34 @@ class Store:
         becomes terminal — otherwise a permanently broken video would be
         retried on every run forever.
 
-        The attempt is counted whatever the cause, including a batch-wide one
-        such as a rate limit. That is deliberate: it is what bounds the retry.
-        The cost is that a run which is rate-limited throughout spends one
-        attempt on every video in it, so the write-off is surfaced by state in
-        `stats()` rather than left to be discovered.
+        `counts_as_attempt=False` records the failure without spending one of
+        those attempts, for causes that are not about this video at all — a
+        stale cookie, an expired session. The request failed on a precondition,
+        so the video was never really tried, and a video that is never tried
+        must not be written off. Such a row can never reach the cap from this
+        path, which is the point: the fault is in the credentials and gets
+        fixed there, not by exhausting the queue.
+
+        Apart from that exemption the attempt is counted whatever the cause,
+        including a batch-wide one such as a rate limit. That is deliberate: it
+        is what bounds the retry. The cost is that a run which is rate-limited
+        throughout spends one attempt on every video in it, so the write-off is
+        surfaced by state in `stats()` rather than left to be discovered.
         """
         state = State.FAILED
         if not terminal:
-            attempted = self.attempts_for(url) + 1
-            state = State.FAILED if attempted >= MAX_ATTEMPTS else State.RETRYABLE
+            if counts_as_attempt:
+                attempted = self.attempts_for(url) + 1
+                state = State.FAILED if attempted >= MAX_ATTEMPTS else State.RETRYABLE
+            else:
+                # Never written off on this path: an uncounted failure cannot
+                # reach the cap, however many times it happens.
+                state = State.RETRYABLE
 
         self.conn.execute(
             "UPDATE videos SET state=?, error=?, last_attempt=?, "
-            "attempts=attempts+1 WHERE url=?",
-            (state, error[:500], _now(), url),
+            "attempts=attempts+? WHERE url=?",
+            (state, error[:500], _now(), 1 if counts_as_attempt else 0, url),
         )
         self.conn.commit()
 
