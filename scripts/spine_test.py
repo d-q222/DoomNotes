@@ -48,12 +48,12 @@ DELETED_IG = "https://www.instagram.com/reel/SPINEdeleted/"
 DELETED_TT = "https://www.tiktokv.com/share/video/7000000000000000002/"
 
 REFS = [
-    VideoRef(GOOD_REEL, "instagram", caption="How to index soft-deleted rows in Postgres.",
+    VideoRef(GOOD_REEL, "instagram", caption_source="export", caption="How to index soft-deleted rows in Postgres.",
              author="@someone", source_order=0),
-    VideoRef(PHOTO_POST, "instagram", caption="Five plants that survive low light.",
+    VideoRef(PHOTO_POST, "instagram", caption_source="export", caption="Five plants that survive low light.",
              author="@someone", source_order=1),
     VideoRef(TIKTOK_OK, "tiktok", saved_at=datetime(2026, 8, 5), source_order=0),
-    VideoRef(DELETED_IG, "instagram", caption="A deleted reel, but the caption survived.",
+    VideoRef(DELETED_IG, "instagram", caption_source="export", caption="A deleted reel, but the caption survived.",
              author="@gone", source_order=2),
     VideoRef(DELETED_TT, "tiktok", saved_at=datetime(2021, 7, 14), source_order=1),
 ]

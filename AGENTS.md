@@ -93,8 +93,8 @@ Several functions are intentionally simplistic, each marked with a `DELIBERATELY
 is intended. They are decisions awaiting a judgement call, not bugs.
 
 Currently: the failure taxonomy and pacing (`download.py`), failure-state handling (`store.py`),
-isolation granularity (`pipeline.py`), registry injection (`tags.py`), `VideoRef` optionality
-(`models.py`), Whisper model size (`config.toml`).
+isolation granularity (`pipeline.py`), registry injection (`tags.py`), Whisper model size
+(`config.toml`).
 
 Their gaps are pinned by `xfail` tests that assert the missing behaviour. Do not delete an `xfail`
 marker to make a suite green — implementing the behaviour is what removes it.

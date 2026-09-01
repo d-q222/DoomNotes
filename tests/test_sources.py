@@ -79,6 +79,7 @@ def test_ig_refs_have_export_caption(ig_file: Path) -> None:
     """This is what makes a caption-only fallback possible for Instagram."""
     refs, _ = ig_export.parse(ig_file)
     assert all(r.has_export_caption for r in refs)
+    assert all(r.caption_source == "export" for r in refs)
 
 
 def test_ig_post_without_owner_block_still_parses(ig_file: Path) -> None:
@@ -125,6 +126,18 @@ def test_tiktok_never_has_caption_or_author(tt_file: Path) -> None:
     refs, _ = tiktok_export.parse(tt_file)
     assert all(r.caption is None and r.author is None for r in refs)
     assert not any(r.has_export_caption for r in refs)
+
+
+def test_tiktok_refs_never_claim_export_provenance(tt_file: Path) -> None:
+    """The adapter owns this claim, and the model cannot police it.
+
+    A ref declaring `caption_source="export"` is trusted, because the model has
+    no way to know what an export file contains. The claim is only as good as
+    the adapter making it, so it is asserted here rather than inferred from
+    `platform` — which would be wrong for a manual-list Instagram ref.
+    """
+    refs, _ = tiktok_export.parse(tt_file)
+    assert all(r.caption_source == "media" for r in refs)
 
 
 def test_tiktok_keeps_save_timestamps(tt_file: Path) -> None:

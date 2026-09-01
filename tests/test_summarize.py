@@ -42,6 +42,7 @@ from doomnotes.tags import TagRegistry
 IG = VideoRef(
     "https://www.instagram.com/reel/AAAAAAAAAAA/",
     "instagram",
+    caption_source="export",
     caption="Three ways to index soft-deleted rows.",
     author="@someone",
     source_order=7,

@@ -128,6 +128,7 @@ def parse(
             VideoRef(
                 url=curl,
                 platform="tiktok",
+                caption_source="media",
                 caption=None,   # never present in this export
                 author=None,    # never present in this export
                 saved_at=saved_at,

@@ -53,7 +53,14 @@ def parse(path: str | Path) -> tuple[list[VideoRef], list[tuple[str, str]]]:
         seen.add(curl)
 
         refs.append(
-            VideoRef(url=curl, platform=platform, source_order=len(refs))
+            VideoRef(
+                url=curl,
+                platform=platform,
+                # Same position as TikTok even for an instagram URL: the
+                # caption arrives with the media, not with the list.
+                caption_source="media",
+                source_order=len(refs),
+            )
         )
     return refs, dropped
 

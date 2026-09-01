@@ -42,6 +42,7 @@ from doomnotes.vault import VaultGuardError, VaultWriter
 IG = VideoRef(
     "https://www.instagram.com/reel/AAAAAAAAAAA/",
     "instagram",
+    caption_source="export",
     caption="A caption that shipped in the export.",
     author="@someone",
     source_order=0,
